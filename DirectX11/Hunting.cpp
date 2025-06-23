@@ -1237,6 +1237,8 @@ static void AnalyseFrame(HackerDevice* device, void* private_data)
 	factx->Release();
 
 	if (G->analyse_frame) {
+		// Frame analysis key has been pressed again while FA was
+		// already in progress, abort:
 		device->GetHackerContext()->FrameAnalysisLog("----- Frame analysis aborted -----\n");
 		LogOverlay(LOG_NOTICE, "Frame analysis aborted\n");
 		return _AnalyseFrameStop();
@@ -1249,24 +1251,43 @@ static void AnalyseFrame(HackerDevice* device, void* private_data)
 	_localtime64_s(&tm, &ltime);
 	wcsftime(subdir, MAX_PATH, L"FrameAnalysis-%Y-%m-%d-%H%M%S", &tm);
 
+	// Try custom path first
 	if (G->CUSTOM_DUMP_PATH[0] != 0) {
-		wcscpy_s(path, MAX_PATH, G->CUSTOM_DUMP_PATH);
+		DWORD attribs = GetFileAttributesW(G->CUSTOM_DUMP_PATH);
+		if (attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY)) {
+			wcscpy_s(path, MAX_PATH, G->CUSTOM_DUMP_PATH);
 
-		size_t len = wcslen(path);
-		if (len > 0 && path[len - 1] != L'\\')
-			wcscat_s(path, MAX_PATH, L"\\");
+			size_t len = wcslen(path);
+			if (len > 0 && path[len - 1] != L'\\')
+				wcscat_s(path, MAX_PATH, L"\\");
+		}
+		else {
+			LogInfoW(L"Invalid custom dump path: %s — falling back to default\n", G->CUSTOM_DUMP_PATH);
+
+			if (!GetModuleFileName(migoto_handle, path, MAX_PATH))
+				return;
+
+			wchar_t* last = wcsrchr(path, L'\\');
+			if (last)
+				last[1] = 0;
+			else
+				path[0] = 0; // Fallback safety
+		}
 	}
 	else {
+		// Default path
 		if (!GetModuleFileName(migoto_handle, path, MAX_PATH))
 			return;
 
-		wcsrchr(path, L'\\')[1] = 0; 
+		wchar_t* last = wcsrchr(path, L'\\');
+		if (last)
+			last[1] = 0;
+		else
+			path[0] = 0;
 	}
 
 	wcscat_s(path, MAX_PATH, subdir);
-
 	LogInfoW(L"Frame analysis directory: %s\n", path);
-	
 	// Bail if the analysis directory already exists or can't be created.
 	// This currently limits us to one / second, but that's probably
 	// enough. We can always increase the granuality if needed.
@@ -1276,7 +1297,6 @@ static void AnalyseFrame(HackerDevice* device, void* private_data)
 	}
 
 	wcscpy(G->ANALYSIS_PATH, path);
-
 	G->cur_analyse_options = G->def_analyse_options;
 	G->frame_analysis_seen_rts.clear();
 	G->analyse_frame_no = 1;
