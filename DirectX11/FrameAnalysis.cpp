@@ -1892,19 +1892,38 @@ static BOOL CreateDeferredFADirectory(LPCWSTR path)
 	return TRUE;
 }
 
-void FrameAnalysisContext::get_deduped_dir(wchar_t *path, size_t size)
+void FrameAnalysisContext::get_deduped_dir(wchar_t* path, size_t size)
 {
 	if (analyse_options & FrameAnalysisOptions::SHARE_DEDUPED) {
-		if (!GetModuleFileName(migoto_handle, path, (DWORD)size))
-			return;
-		wcsrchr(path, L'\\')[1] = 0;
-		wcscat_s(path, size, L"FrameAnalysisDeduped");
-	} else {
+		if (G->CUSTOM_DUMP_PATH[0] != 0) {
+			wcscpy_s(path, size, G->CUSTOM_DUMP_PATH);
+
+			size_t len = wcslen(path);
+			if (len > 0 && path[len - 1] != L'\\')
+				wcscat_s(path, size, L"\\");
+
+			wcscat_s(path, size, L"FrameAnalysisDeduped");
+		}
+		else {
+			if (!GetModuleFileName(migoto_handle, path, (DWORD)size))
+				return;
+
+			wchar_t* last_slash = wcsrchr(path, L'\\');
+			if (last_slash)
+				last_slash[1] = 0;
+			else
+				path[0] = 0;
+
+			wcscat_s(path, size, L"FrameAnalysisDeduped");
+		}
+	}
+	else {
 		_snwprintf_s(path, size, size, L"%ls\\deduped", G->ANALYSIS_PATH);
 	}
 
 	CreateDirectoryEnsuringAccess(path);
 }
+
 
 HRESULT FrameAnalysisContext::FrameAnalysisFilename(wchar_t *filename, size_t size, bool compute,
 		wchar_t *reg, char shader_type, int idx, ID3D11Resource *handle)

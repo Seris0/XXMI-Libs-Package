@@ -4213,6 +4213,13 @@ void LoadConfigFile()
 		if (G->enable_hooks & EnableHooks::DEPRECATED)
 			LogOverlay(LOG_NOTICE, "Deprecated hook options: Please remove \"except\" and \"skip\" options\n");
 	}
+
+	if (GetIniStringAndLog(L"System", L"dump_path", 0, G->CUSTOM_DUMP_PATH, MAX_PATH)) {
+		LogInfoW(L"Custom dump path loaded: %s\n", G->CUSTOM_DUMP_PATH);
+	}
+	else {
+		G->CUSTOM_DUMP_PATH[0] = 0;  // empty = use default logic in AnalyseFrame
+	}
 	G->enable_check_interface = GetIniBool(L"System", L"allow_check_interface", false, NULL);
 	G->enable_create_device = GetIniInt(L"System", L"allow_create_device", 0, NULL);
 	G->enable_platform_update = GetIniBool(L"System", L"allow_platform_update", false, NULL);
