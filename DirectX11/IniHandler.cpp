@@ -1344,6 +1344,7 @@ static void ParseIncludedIniFiles()
 				LogInfo("  %S=%S\n", key->c_str(), val->c_str());
 
 				rel_path = namespace_path + *val;
+				std::replace(ini_path.begin(), ini_path.end(), L'/', L'\\');
 
 				// This is not a strong protection against including the same file multiple times,
 				// but it is intended to ensure that this do while loop will eventually terminate.
