@@ -1225,7 +1225,7 @@ static void _AnalyseFrameStop()
 
 static void AnalyseFrame(HackerDevice *device, void *private_data)
 {
-	FrameAnalysisContext *factx = NULL;
+	FrameAnalysisContext* factx = NULL;
 	wchar_t path[MAX_PATH], subdir[MAX_PATH];
 	time_t ltime;
 	struct tm tm;
@@ -1237,8 +1237,6 @@ static void AnalyseFrame(HackerDevice *device, void *private_data)
 	factx->Release();
 
 	if (G->analyse_frame) {
-		// Frame analysis key has been pressed again while FA was
-		// already in progress, abort:
 		device->GetHackerContext()->FrameAnalysisLog("----- Frame analysis aborted -----\n");
 		LogOverlay(LOG_NOTICE, "Frame analysis aborted\n");
 		return _AnalyseFrameStop();
@@ -1250,17 +1248,22 @@ static void AnalyseFrame(HackerDevice *device, void *private_data)
 	time(&ltime);
 	_localtime64_s(&tm, &ltime);
 	wcsftime(subdir, MAX_PATH, L"FrameAnalysis-%Y-%m-%d-%H%M%S", &tm);
+	if (G->CUSTOM_DUMP_PATH[0] != 0) {
+		wcscpy_s(path, MAX_PATH, G->CUSTOM_DUMP_PATH);
+		size_t len = wcslen(path);
+		if (len > 0 && path[len - 1] != L'\\')
+			wcscat_s(path, MAX_PATH, L"\\");
+	}
+	else {
+		if (!GetModuleFileName(migoto_handle, path, MAX_PATH))
+			return;
 
-	if (!GetModuleFileName(migoto_handle, path, MAX_PATH))
-		return;
-	wcsrchr(path, L'\\')[1] = 0;
+		wcsrchr(path, L'\\')[1] = 0;  
+	}
 	wcscat_s(path, MAX_PATH, subdir);
 
 	LogInfoW(L"Frame analysis directory: %s\n", path);
 
-	// Bail if the analysis directory already exists or can't be created.
-	// This currently limits us to one / second, but that's probably
-	// enough. We can always increase the granuality if needed.
 	if (!CreateDirectoryEnsuringAccess(path)) {
 		LogInfoW(L"Error creating frame analysis directory: %i\n", GetLastError());
 		return;
@@ -1474,7 +1477,7 @@ static void HuntPrev(char *type, std::set<ItemType> *visited,
 		} else {
 			*selectedPos = size - 1;
 			*selected = *std::prev(end);
-			LogInfo("> starting at %s shader #%d. Number of %s shaders in frame: %d\n",
+			LogInfo("> starting at %s shader #%d. Number of %s shaders in frame00: %d\n",
 					type, *selectedPos, type, size);
 		}
 	}

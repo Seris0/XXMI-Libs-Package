@@ -409,6 +409,7 @@ struct Globals
 	wchar_t SHADER_PATH[MAX_PATH];
 	wchar_t SHADER_CACHE_PATH[MAX_PATH];
 	wchar_t CHAIN_DLL_PATH[MAX_PATH];
+	wchar_t CUSTOM_DUMP_PATH[MAX_PATH];
 	int load_library_redirect;
 
 	std::wstring user_config;
@@ -709,6 +710,7 @@ struct Globals
 
 		ANALYSIS_PATH[0] = 0;
 
+		CUSTOM_DUMP_PATH[0] = 0;
 		for (i = 0; i < 4; i++)
 			gTuneValue[i] = 1.0f;
 

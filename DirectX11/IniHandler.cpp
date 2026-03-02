@@ -1344,7 +1344,7 @@ static void ParseIncludedIniFiles()
 				LogInfo("  %S=%S\n", key->c_str(), val->c_str());
 
 				rel_path = namespace_path + *val;
-
+				std::replace(rel_path.begin(), rel_path.end(), L'/', L'\\');
 				// This is not a strong protection against including the same file multiple times,
 				// but it is intended to ensure that this do while loop will eventually terminate.
 				if (seen.count(rel_path)) {
@@ -2005,19 +2005,19 @@ static void ParseCommandList(const wchar_t *id,
 			// the user config to be updated at the next save, but won't do this
 			// immediately just in case. Inform the user of what is happening.
 			if (!G->user_config_dirty) {
-				LogOverlay(LOG_WARNING,
-					"NOTICE: Unknown user settings will be removed from d3dx_user.ini\n"
-					" This is normal if you recently removed/changed any mods\n"
-					" Press %S to update the config now, or %S to reset all settings to default\n"
-					" The first unrecognised entry was: \"%S\"\n",
-					user_friendly_ini_key_binding(L"Hunting", L"reload_config").c_str(),
-					user_friendly_ini_key_binding(L"Hunting", L"wipe_user_config").c_str(),
-					raw_line->c_str());
+				//LogOverlay(LOG_WARNING,
+				//	"NOTICE: Unknown user settings will be removed from d3dx_user.ini\n"
+				//	" This is normal if you recently removed/changed any mods\n"
+				//	" Press %S to update the config now, or %S to reset all settings to default\n"
+				//	" The first unrecognised entry was: \"%S\"\n",
+				//	user_friendly_ini_key_binding(L"Hunting", L"reload_config").c_str(),
+				//	user_friendly_ini_key_binding(L"Hunting", L"wipe_user_config").c_str(),
+				//	raw_line->c_str());
 				// Once the [Constants] command list has finished running the
 				// low bit will be cleared to ensure that loading the user config
 				// itself cannot mark the user config as dirty. Set the second
 				// bit to indicate that it should be updated regardless:
-				G->user_config_dirty |= 2;
+				//G->user_config_dirty |= 2;
 			}
 			// There might be a lot of entries if a large mod was just
 			// uninstalled, so we only show the first bad setting on the
@@ -2235,6 +2235,7 @@ wchar_t *ShaderOverrideIniKeys[] = {
 	L"hash",
 	L"allow_duplicate_hash",
 	L"depth_filter",
+	L"partner",
 	L"model",
 	L"disable_scissor",
 	L"filter_index",
@@ -2505,26 +2506,11 @@ static ShaderRegexGroup* get_regex_group(std::wstring *regex_id, bool allow_crea
 	}
 }
 
-// Bo3b: 
-//   If we have a bad parse, we could wind up with a dangling half-baked
-//	 command list that would crash. Now also clearing them on error exit.
-static void delete_regex_group(std::wstring* regex_id)
+static void delete_regex_group(std::wstring *regex_id)
 {
 	ShaderRegexGroups::iterator i;
 
 	i = shader_regex_groups.find(*regex_id);
-	if (i != shader_regex_groups.end())
-	{
-		auto it = std::find(registered_command_lists.begin(), registered_command_lists.end(), &i->second.command_list);
-		if (it != registered_command_lists.end())
-			registered_command_lists.erase(it);
-		it = std::find(registered_command_lists.begin(), registered_command_lists.end(), &i->second.post_command_list);
-		if (it != registered_command_lists.end())
-			registered_command_lists.erase(it);
-
-		i->second.command_list.clear();
-		i->second.post_command_list.clear();
-	}
 	shader_regex_groups.erase(i);
 }
 
@@ -4226,6 +4212,20 @@ void LoadConfigFile()
 
 		if (G->enable_hooks & EnableHooks::DEPRECATED)
 			LogOverlay(LOG_NOTICE, "Deprecated hook options: Please remove \"except\" and \"skip\" options\n");
+	}
+
+	if (GetIniStringAndLog(L"System", L"dump_path", 0, G->CUSTOM_DUMP_PATH, MAX_PATH)) {
+		DWORD attr = GetFileAttributesW(G->CUSTOM_DUMP_PATH);
+		if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+			LogInfoW(L"Custom dump path loaded: %s\n", G->CUSTOM_DUMP_PATH);
+		}
+		else {
+			LogInfoW(L"Custom dump path is invalid or does not exist, falling back to default\n");
+			G->CUSTOM_DUMP_PATH[0] = 0;
+		}
+	}
+	else {
+		G->CUSTOM_DUMP_PATH[0] = 0; 
 	}
 	G->enable_check_interface = GetIniBool(L"System", L"allow_check_interface", false, NULL);
 	G->enable_create_device = GetIniInt(L"System", L"allow_create_device", 0, NULL);

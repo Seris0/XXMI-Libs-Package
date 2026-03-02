@@ -652,7 +652,7 @@ void Overlay::DrawShaderInfoLine(char *type, UINT64 selectedShader, float *y, bo
 
 	textPosition = Vector2(x, *y);
 	*y += strSize.y;
-	DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::LimeGreen);
+	DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::DeepPink);
 }
 
 void Overlay::DrawShaderInfoLines(float *y)
@@ -775,7 +775,7 @@ void Overlay::DrawOverlay(void)
 				CreateShaderCountString(osdString);
 				strSize = mFont->MeasureString(osdString);
 				textPosition = Vector2(float(mResolution.x - strSize.x) / 2, y);
-				DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::LimeGreen);
+				DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::DeepPink);
 				y += strSize.y;
 
 				DrawShaderInfoLines(&y);
@@ -784,7 +784,7 @@ void Overlay::DrawOverlay(void)
 				CreateInfoString(osdString);
 				strSize = mFont->MeasureString(osdString);
 				textPosition = Vector2(float(mResolution.x - strSize.x) / 2, float(mResolution.y - strSize.y - 10));
-				DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::LimeGreen);
+				DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::DeepPink);
 			}
 
 			if (has_notice)
@@ -843,7 +843,7 @@ void LogOverlayW(LogLevel level, wchar_t *fmt, ...)
 	// Using _vsnwprintf_s so we don't crash if the message is too long for
 	// the buffer, and truncate it instead - unless we can automatically
 	// wrap the message, which DirectXTK doesn't appear to support, who
-	// cares if it gets cut off somewhere off screen anyway?
+	// cares if it gets cut off somewhere off screen anyway? XDDDD
 	_vsnwprintf_s(msg, maxstring, _TRUNCATE, fmt, ap);
 
 	EnterCriticalSectionPretty(&notices.lock);

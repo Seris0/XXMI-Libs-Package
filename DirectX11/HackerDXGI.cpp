@@ -325,7 +325,7 @@ void HackerSwapChain::RunFrameActions()
 //
 STDMETHODIMP HackerSwapChain::QueryInterface(THIS_
 	/* [in] */ REFIID riid,
-	/* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR *__RPC_FAR *ppvObject)
+	/* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR* __RPC_FAR* ppvObject)
 {
 	LogInfo("HackerSwapChain::QueryInterface(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(riid).c_str());
 
@@ -345,25 +345,14 @@ STDMETHODIMP HackerSwapChain::QueryInterface(THIS_
 	// entire wrapping strategy.  If the object we've wrapped is a superclass of the
 	// object they desire, the vtable is not going to match.
 
-	if (riid == __uuidof(IDXGISwapChain2))
+	if (riid == __uuidof(IDXGISwapChain2) ||
+		riid == __uuidof(IDXGISwapChain3) ||
+		riid == __uuidof(IDXGISwapChain4))
 	{
-		// Return interface without wrapper to support Endfield's pipeline.
-		LogInfo("  return IDXGISwapChain2 interface (%p) without wrapper.\n", ppvObject);
+		// Return interface without wrapper to support modern pipeline features and prevent crashes.
+		LogInfo("  return IDXGISwapChain 2/3/4 interface (%p) without wrapper.\n", ppvObject);
 		LogInfo("  returns result = %x for %p\n", hr, ppvObject);
 		return hr;
-	}
-	if (riid == __uuidof(IDXGISwapChain3))
-	{
-		// Return interface without wrapper to support HDR color space setup.
-		LogInfo("  return IDXGISwapChain3 interface (%p) without wrapper.\n", ppvObject);
-		LogInfo("  returns result = %x for %p\n", hr, ppvObject);
-		return hr;
-	}
-	if (riid == __uuidof(IDXGISwapChain4))
-	{
-		LogInfo("***  returns E_NOINTERFACE as error for IDXGISwapChain4.\n");
-		*ppvObject = NULL;
-		return E_NOINTERFACE;
 	}
 
 	IUnknown* unk_this;
