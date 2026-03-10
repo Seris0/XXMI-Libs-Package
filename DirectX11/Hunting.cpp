@@ -1215,6 +1215,8 @@ static void EnableFix(HackerDevice *device, void *private_data)
 static void _AnalyseFrameStop()
 {
 	G->analyse_frame = false;
+	G->analyse_frame_ib_focus = 0;
+	G->analyse_frame_vb_focus = 0;
 	if (G->DumpUsage) {
 		EnterCriticalSectionPretty(&G->mCriticalSection);
 			DumpUsage(G->ANALYSIS_PATH);
@@ -1274,7 +1276,42 @@ static void AnalyseFrame(HackerDevice *device, void *private_data)
 	G->cur_analyse_options = G->def_analyse_options;
 	G->frame_analysis_seen_rts.clear();
 	G->analyse_frame_no = 1;
+
+	// Reset any focus when doing a regular dump
+	if (!G->analyse_frame_ib_focus && !G->analyse_frame_vb_focus) {
+		G->analyse_frame_ib_focus = 0;
+		G->analyse_frame_vb_focus = 0;
+	}
+
 	G->analyse_frame = true;
+}
+
+static void DumpIndexBuffer(HackerDevice *device, void *private_data)
+{
+	if (G->hunting != HUNTING_MODE_ENABLED)
+		return;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	if (G->mSelectedIndexBuffer != 0xFFFFFFFF && G->mSelectedIndexBuffer != -1) {
+		G->analyse_frame_ib_focus = G->mSelectedIndexBuffer;
+		G->analyse_frame_vb_focus = 0;
+		AnalyseFrame(device, private_data);
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+static void DumpVertexBuffer(HackerDevice *device, void *private_data)
+{
+	if (G->hunting != HUNTING_MODE_ENABLED)
+		return;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	if (G->mSelectedVertexBuffer != 0xFFFFFFFF && G->mSelectedVertexBuffer != -1) {
+		G->analyse_frame_ib_focus = 0;
+		G->analyse_frame_vb_focus = G->mSelectedVertexBuffer;
+		AnalyseFrame(device, private_data);
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
 }
 
 static void AnalyseFrameStop(HackerDevice *device, void *private_data)
@@ -1937,10 +1974,12 @@ void ParseHuntingSection()
 	RegisterIniKeyBinding(L"Hunting", L"next_vertexbuffer", NextVertexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_vertexbuffer", PrevVertexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"mark_vertexbuffer", MarkVertexBuffer, NULL, noRepeat, NULL);
+	RegisterIniKeyBinding(L"Hunting", L"dump_vertexbuffer", DumpVertexBuffer, NULL, noRepeat, NULL);
 
 	RegisterIniKeyBinding(L"Hunting", L"next_indexbuffer", NextIndexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_indexbuffer", PrevIndexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"mark_indexbuffer", MarkIndexBuffer, NULL, noRepeat, NULL);
+	RegisterIniKeyBinding(L"Hunting", L"dump_indexbuffer", DumpIndexBuffer, NULL, noRepeat, NULL);
 
 	RegisterIniKeyBinding(L"Hunting", L"next_vertexshader", NextVertexShader, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_vertexshader", PrevVertexShader, NULL, repeat, NULL);

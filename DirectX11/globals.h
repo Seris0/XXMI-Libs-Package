@@ -451,6 +451,8 @@ struct Globals
 
 	bool frame_analysis_registered;
 	bool analyse_frame;
+	uint32_t analyse_frame_ib_focus;
+	uint32_t analyse_frame_vb_focus;
 	unsigned analyse_frame_no;
 	wchar_t ANALYSIS_PATH[MAX_PATH];
 	FrameAnalysisOptions def_analyse_options, cur_analyse_options;
@@ -639,6 +641,8 @@ struct Globals
 
 		frame_analysis_registered(false),
 		analyse_frame(false),
+		analyse_frame_ib_focus(0),
+		analyse_frame_vb_focus(0),
 		analyse_frame_no(0),
 		def_analyse_options(FrameAnalysisOptions::INVALID),
 		cur_analyse_options(FrameAnalysisOptions::INVALID),

@@ -2843,6 +2843,27 @@ void FrameAnalysisContext::FrameAnalysisAfterDraw(bool compute, DrawCallInfo *ca
 		return;
 	}
 
+	if (G->analyse_frame_ib_focus != 0) {
+		if (mCurrentIndexBuffer != G->analyse_frame_ib_focus) {
+			draw_call++;
+			return;
+		}
+	}
+
+	if (G->analyse_frame_vb_focus != 0) {
+		bool found_vb = false;
+		for (UINT i = 0; i < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT; i++) {
+			if (mCurrentVertexBuffers[i] == G->analyse_frame_vb_focus) {
+				found_vb = true;
+				break;
+			}
+		}
+		if (!found_vb) {
+			draw_call++;
+			return;
+		}
+	}
+
 	analyse_options &= (FrameAnalysisOptions)~FrameAnalysisOptions::STEREO_MASK;
 	analyse_options |= FrameAnalysisOptions::MONO;
 

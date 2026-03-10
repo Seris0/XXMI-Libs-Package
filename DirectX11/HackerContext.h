@@ -114,14 +114,6 @@ private:
 	ID3D11DeviceContext1 *mRealOrigContext1;
 	HackerDevice *mHackerDevice;
 
-	// These are per-context, moved from globals.h:
-	uint32_t mCurrentVertexBuffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
-	uint32_t mCurrentIndexBuffer; // Only valid while hunting=1
-	std::vector<ID3D11Resource *> mCurrentRenderTargets;
-	ID3D11Resource *mCurrentDepthTarget;
-	UINT mCurrentPSUAVStartSlot;
-	UINT mCurrentPSNumUAVs;
-
 	// Used for deny_cpu_read, track_texture_updates and constant buffer matching
 	typedef std::unordered_map<ID3D11Resource*, MappedResourceInfo> MappedResources;
 	MappedResources mMappedResources;
@@ -205,6 +197,14 @@ protected:
 	UINT64 mCurrentGeometryShader;
 	UINT64 mCurrentPixelShader;
 	UINT64 mCurrentComputeShader;
+
+	// These are per-context, moved from globals.h:
+	uint32_t mCurrentVertexBuffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+	uint32_t mCurrentIndexBuffer; // Only valid while hunting=1
+	std::vector<ID3D11Resource *> mCurrentRenderTargets;
+	ID3D11Resource *mCurrentDepthTarget;
+	UINT mCurrentPSUAVStartSlot;
+	UINT mCurrentPSNumUAVs;
 
 public:
 	HackerContext(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1);
