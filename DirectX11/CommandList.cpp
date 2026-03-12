@@ -6074,7 +6074,36 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 	if (!resource)
 		return;
 
-	find_texture_overrides_for_resource(resource, matches, state->call_info);
+	// For vertex and index buffers the game may pack multiple meshes into
+	// one buffer and bind them at different offsets.  In that case the base
+	// resource hash alone is not enough – we must use the same combined
+	// hash (base + offset + stride/format) that IASetVertexBuffers /
+	// IASetIndexBuffer computed and stored in mCurrentVertexBuffers[] /
+	// mCurrentIndexBuffer, and that the hunting overlay displays.  That way
+	// the hash the user copies from the overlay matches the one looked up
+	// here, and ini [TextureOverride] sections work correctly.
+	if (type == ResourceCopyTargetType::VERTEX_BUFFER) {
+		ID3D11Buffer *buf = NULL;
+		UINT stride = 0, offset = 0;
+		state->mOrigContext1->IAGetVertexBuffers(slot, 1, &buf, &stride, &offset);
+		if (buf) buf->Release();
+		D3D11_BUFFER_DESC buf_desc = {};
+		((ID3D11Buffer*)resource)->GetDesc(&buf_desc);
+		hash = GetCombinedResourceHash(GetResourceHash(resource), offset, stride);
+		find_texture_overrides<D3D11_BUFFER_DESC>(hash, &buf_desc, matches, state->call_info);
+	} else if (type == ResourceCopyTargetType::INDEX_BUFFER) {
+		ID3D11Buffer *buf = NULL;
+		DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+		UINT offset = 0;
+		state->mOrigContext1->IAGetIndexBuffer(&buf, &fmt, &offset);
+		if (buf) buf->Release();
+		D3D11_BUFFER_DESC buf_desc = {};
+		((ID3D11Buffer*)resource)->GetDesc(&buf_desc);
+		hash = GetCombinedResourceHash(GetResourceHash(resource), offset, (UINT)fmt);
+		find_texture_overrides<D3D11_BUFFER_DESC>(hash, &buf_desc, matches, state->call_info);
+	} else {
+		find_texture_overrides_for_resource(resource, matches, state->call_info);
+	}
 
 	//COMMAND_LIST_LOG(state, "  found texture hash = %08llx\n", hash);
 

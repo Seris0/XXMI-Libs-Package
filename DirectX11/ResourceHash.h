@@ -192,6 +192,10 @@ uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SU
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
 uint32_t GetResourceHash(ID3D11Resource *resource);
+// Combines a base resource hash with binding parameters (slot index, stride,
+// offset, format, etc.) so that the same underlying buffer bound at different
+// slots/offsets/strides gets a unique, stable 8-digit hash for hunting.
+uint32_t GetCombinedResourceHash(uint32_t base_hash, UINT a, UINT b = 0);
 
 void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 		ID3D11Resource *src, UINT srcSubresource, char type,

@@ -860,6 +860,20 @@ uint32_t GetResourceHash(ID3D11Resource *resource)
 	return 0;
 }
 
+// Combines a base resource hash with up to two additional UINT values using the
+// same boost::hash_combine mixing already used elsewhere in this file.
+// This gives each (buffer, slot, stride) or (buffer, offset, format) tuple its
+// own stable 8-digit hash without altering the underlying resource hash, so the
+// same physical buffer bound at different IA slots or offsets becomes uniquely
+// identifiable during hunting.
+uint32_t GetCombinedResourceHash(uint32_t base_hash, UINT a, UINT b)
+{
+	uint32_t seed = base_hash;
+	seed ^= (uint32_t)std::hash<UINT>()(a) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+	seed ^= (uint32_t)std::hash<UINT>()(b) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+	return seed;
+}
+
 uint32_t CalcTexture1DDataHash(
 	const D3D11_TEXTURE1D_DESC *pDesc,
 	const D3D11_SUBRESOURCE_DATA *pInitialData)

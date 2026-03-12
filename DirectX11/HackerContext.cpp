@@ -1325,8 +1325,16 @@ STDMETHODIMP_(void) HackerContext::IASetVertexBuffers(THIS_
 	 if (G->hunting == HUNTING_MODE_ENABLED) {
 		EnterCriticalSectionPretty(&G->mCriticalSection);
 		for (UINT i = StartSlot; (i < StartSlot + NumBuffers) && (i < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT); i++) {
-			if (ppVertexBuffers && ppVertexBuffers[i]) {
-				mCurrentVertexBuffers[i] = GetResourceHash(ppVertexBuffers[i]);
+			UINT idx = i - StartSlot; // correct 0-based index into the caller's arrays
+			if (ppVertexBuffers && ppVertexBuffers[idx]) {
+				uint32_t base = GetResourceHash(ppVertexBuffers[idx]);
+				// Mix in the byte offset and stride so that the same buffer bound
+				// at a different offset (different mesh packed inside the same VB)
+				// or with a different vertex stride gets a unique hash per draw.
+				// This mirrors exactly how IASetIndexBuffer handles the IB case.
+				UINT offset = pOffsets ? pOffsets[idx] : 0;
+				UINT stride = pStrides ? pStrides[idx] : 0;
+				mCurrentVertexBuffers[i] = GetCombinedResourceHash(base, offset, stride);
 				G->mVisitedVertexBuffers.insert(mCurrentVertexBuffers[i]);
 			} else
 				mCurrentVertexBuffers[i] = 0;
@@ -2814,7 +2822,11 @@ STDMETHODIMP_(void) HackerContext::IASetIndexBuffer(THIS_
 	// command list checks the hash on demand only when it is needed
 	mCurrentIndexBuffer = 0;
 	if (pIndexBuffer && G->hunting == HUNTING_MODE_ENABLED) {
-		mCurrentIndexBuffer = GetResourceHash(pIndexBuffer);
+		uint32_t base = GetResourceHash(pIndexBuffer);
+		// Mix in Offset and Format so that the same buffer bound as an IB
+		// at a different byte offset or with a different index format gets
+		// a distinct hash in the hunt.
+		mCurrentIndexBuffer = GetCombinedResourceHash(base, Offset, (UINT)Format);
 		if (mCurrentIndexBuffer) {
 			// When hunting, save this as a visited index buffer to cycle through.
 			EnterCriticalSectionPretty(&G->mCriticalSection);

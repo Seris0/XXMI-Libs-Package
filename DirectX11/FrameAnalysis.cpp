@@ -7,6 +7,7 @@
 #include "FrameAnalysis.h"
 #include "Globals.h"
 #include "input.h"
+#include "ResourceHash.h"
 
 #include <ScreenGrab.h>
 #include <wincodec.h>
@@ -217,13 +218,21 @@ void FrameAnalysisContext::FrameAnalysisLogShaderHash(ID3D11Shader *shader)
 	fprintf(frame_analysis_log, "\n");
 }
 
-void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *resource)
+void FrameAnalysisContext::FrameAnalysisLogResourceHash(ID3D11Resource *resource)
 {
 	uint32_t hash, orig_hash;
 	struct ResourceHashInfo *info;
 
-	if (!G->analyse_frame || !frame_analysis_log || !resource)
+	// Always complete the line in the debug log:
+	LogDebug("\n");
+
+	if (!G->analyse_frame || !frame_analysis_log)
 		return;
+
+	if (!resource) {
+		fprintf(frame_analysis_log, "\n");
+		return;
+	}
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	EnterCriticalSectionPretty(&G->mResourcesLock);
@@ -253,17 +262,6 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 
 	LeaveCriticalSection(&G->mResourcesLock);
 	LeaveCriticalSection(&G->mCriticalSection);
-}
-
-void FrameAnalysisContext::FrameAnalysisLogResourceHash(ID3D11Resource* resource)
-{
-	// Always complete the line in the debug log:
-	LogDebug("\n");
-
-	if (!G->analyse_frame || !frame_analysis_log)
-		return;
-
-	FrameAnalysisLogResourceHashInline(resource);
 
 	fprintf(frame_analysis_log, "\n");
 }
@@ -456,33 +454,6 @@ void FrameAnalysisContext::FrameAnalysisLogData(void *buf, UINT size)
 	for (i = 0; i < size; i++, ptr++)
 		fprintf(frame_analysis_log, "%02x", *ptr);
 	fprintf(frame_analysis_log, "\n");
-}
-
-void FrameAnalysisContext::FrameAnalysisLogConstantBuffer(int slot, char* slot_name, ID3D11Resource* resource, UINT first_constant, UINT num_constants)
-{
-	if (!resource || !G->analyse_frame || !frame_analysis_log)
-		return;
-
-	FrameAnalysisLogSlot(frame_analysis_log, slot, slot_name);
-	fprintf(frame_analysis_log, " resource=0x%p", resource);
-
-	FrameAnalysisLogResourceHashInline(resource);
-
-	fprintf(frame_analysis_log, " first_constant=%u num_constants=%u", first_constant, num_constants);
-
-	fprintf(frame_analysis_log, "\n");
-	LogDebug("\n");
-}
-
-void FrameAnalysisContext::FrameAnalysisLogConstantBufferArray(UINT start, UINT len, ID3D11Resource* const* ppResources, const UINT* pFirstConstant, const UINT* pNumConstants)
-{
-	UINT i;
-
-	if (!ppResources || !G->analyse_frame || !frame_analysis_log)
-		return;
-
-	for (i = 0; i < len; i++)
-		FrameAnalysisLogConstantBuffer(start + i, NULL, ppResources[i], pFirstConstant ? pFirstConstant[i] : 0, pNumConstants ? pNumConstants[i] : 0);
 }
 
 ID3D11DeviceContext* FrameAnalysisContext::GetDumpingContext()
@@ -1956,7 +1927,8 @@ void FrameAnalysisContext::get_deduped_dir(wchar_t *path, size_t size)
 
 
 HRESULT FrameAnalysisContext::FrameAnalysisFilename(wchar_t *filename, size_t size, bool compute,
-		wchar_t *reg, char shader_type, int idx, ID3D11Resource *handle)
+		wchar_t *reg, char shader_type, int idx, ID3D11Resource *handle,
+		uint32_t override_hash)
 {
 	struct ResourceHashInfo *info;
 	uint32_t hash, orig_hash;
@@ -1997,8 +1969,18 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilename(wchar_t *filename, size_t si
 
 	EnterCriticalSectionPretty(&G->mResourcesLock);
 	try {
-		hash = G->mResources.at(handle).hash;
-		orig_hash = G->mResources.at(handle).orig_hash;
+		// If override_hash is provided (e.g. combined VB/IB hash including
+		// offset+stride), use it as the display hash so the dumped filename
+		// matches exactly what the hunting overlay shows and what must be
+		// placed in the ini [TextureOverride] hash. Fall back to the
+		// resource's stored base hash when no override is given.
+		if (override_hash) {
+			hash = override_hash;
+			orig_hash = G->mResources.at(handle).orig_hash;
+		} else {
+			hash = G->mResources.at(handle).hash;
+			orig_hash = G->mResources.at(handle).orig_hash;
+		}
 	} catch (std::out_of_range) {
 		hash = orig_hash = 0;
 	}
@@ -2540,7 +2522,8 @@ void FrameAnalysisContext::DumpVBs(DrawCallInfo *call_info, ID3D11Buffer *staged
 		if (!vb_slot_in_layout(i, layout_desc))
 			goto continue_release;
 
-		hr = FrameAnalysisFilename(filename, MAX_PATH, false, L"vb", NULL, i, buffers[i]);
+		hr = FrameAnalysisFilename(filename, MAX_PATH, false, L"vb", NULL, i, buffers[i],
+				GetCombinedResourceHash(GetResourceHash(buffers[i]), offsets[i], strides[i]));
 		if (SUCCEEDED(hr)) {
 			DumpBuffer(buffers[i], filename,
 				FrameAnalysisOptions::DUMP_VB, i,
@@ -2578,7 +2561,8 @@ void FrameAnalysisContext::DumpIB(DrawCallInfo *call_info, ID3D11Buffer **staged
 		return;
 	GetPassThroughOrigContext1()->IAGetPrimitiveTopology(&topology);
 
-	hr = FrameAnalysisFilename(filename, MAX_PATH, false, L"ib", NULL, -1, buffer);
+	hr = FrameAnalysisFilename(filename, MAX_PATH, false, L"ib", NULL, -1, buffer,
+			GetCombinedResourceHash(GetResourceHash(buffer), *offset, (UINT)*format));
 	if (SUCCEEDED(hr)) {
 		DumpBuffer(buffer, filename,
 				FrameAnalysisOptions::DUMP_IB, -1,
@@ -4850,7 +4834,7 @@ void STDMETHODCALLTYPE FrameAnalysisContext::VSSetConstantBuffers1(
 {
 	FrameAnalysisLog("VSSetConstantBuffers1(StartSlot:%u, NumBuffers:%u, ppConstantBuffers:0x%p, pFirstConstant:0x%p, pNumConstants:0x%p)\n",
 			StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-	FrameAnalysisLogConstantBufferArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers, pFirstConstant, pNumConstants);
+	FrameAnalysisLogResourceArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers);
 
 	HackerContext::VSSetConstantBuffers1(StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
@@ -4869,7 +4853,7 @@ void STDMETHODCALLTYPE FrameAnalysisContext::HSSetConstantBuffers1(
 {
 	FrameAnalysisLog("HSSetConstantBuffers1(StartSlot:%u, NumBuffers:%u, ppConstantBuffers:0x%p, pFirstConstant:0x%p, pNumConstants:0x%p)\n",
 			StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-	FrameAnalysisLogConstantBufferArray(StartSlot, NumBuffers, (ID3D11Resource* const*)ppConstantBuffers, pFirstConstant, pNumConstants);
+	FrameAnalysisLogResourceArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers);
 
 	HackerContext::HSSetConstantBuffers1(StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
@@ -4888,7 +4872,7 @@ void STDMETHODCALLTYPE FrameAnalysisContext::DSSetConstantBuffers1(
 {
 	FrameAnalysisLog("DSSetConstantBuffers1(StartSlot:%u, NumBuffers:%u, ppConstantBuffers:0x%p, pFirstConstant:0x%p, pNumConstants:0x%p)\n",
 			StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-	FrameAnalysisLogConstantBufferArray(StartSlot, NumBuffers, (ID3D11Resource* const*)ppConstantBuffers, pFirstConstant, pNumConstants);
+	FrameAnalysisLogResourceArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers);
 
 	HackerContext::DSSetConstantBuffers1(StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
@@ -4907,7 +4891,7 @@ void STDMETHODCALLTYPE FrameAnalysisContext::GSSetConstantBuffers1(
 {
 	FrameAnalysisLog("GSSetConstantBuffers1(StartSlot:%u, NumBuffers:%u, ppConstantBuffers:0x%p, pFirstConstant:0x%p, pNumConstants:0x%p)\n",
 			StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-	FrameAnalysisLogConstantBufferArray(StartSlot, NumBuffers, (ID3D11Resource* const*)ppConstantBuffers, pFirstConstant, pNumConstants);
+	FrameAnalysisLogResourceArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers);
 
 	HackerContext::GSSetConstantBuffers1(StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
@@ -4926,7 +4910,7 @@ void STDMETHODCALLTYPE FrameAnalysisContext::PSSetConstantBuffers1(
 {
 	FrameAnalysisLog("PSSetConstantBuffers1(StartSlot:%u, NumBuffers:%u, ppConstantBuffers:0x%p, pFirstConstant:0x%p, pNumConstants:0x%p)\n",
 			StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-	FrameAnalysisLogConstantBufferArray(StartSlot, NumBuffers, (ID3D11Resource* const*)ppConstantBuffers, pFirstConstant, pNumConstants);
+	FrameAnalysisLogResourceArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers);
 
 	HackerContext::PSSetConstantBuffers1(StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
@@ -4945,7 +4929,7 @@ void STDMETHODCALLTYPE FrameAnalysisContext::CSSetConstantBuffers1(
 {
 	FrameAnalysisLog("CSSetConstantBuffers1(StartSlot:%u, NumBuffers:%u, ppConstantBuffers:0x%p, pFirstConstant:0x%p, pNumConstants:0x%p)\n",
 			StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-	FrameAnalysisLogConstantBufferArray(StartSlot, NumBuffers, (ID3D11Resource* const*)ppConstantBuffers, pFirstConstant, pNumConstants);
+	FrameAnalysisLogResourceArray(StartSlot, NumBuffers, (ID3D11Resource *const *)ppConstantBuffers);
 
 	HackerContext::CSSetConstantBuffers1(StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
 }
