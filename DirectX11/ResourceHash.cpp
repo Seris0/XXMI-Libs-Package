@@ -874,6 +874,158 @@ uint32_t GetCombinedResourceHash(uint32_t base_hash, UINT a, UINT b)
 	return seed;
 }
 
+// Computes a stable, session-independent hash from the fields of a buffer
+// descriptor that are meaningful and deterministic (ByteWidth, BindFlags,
+// StructureByteStride).  We intentionally exclude Usage and CPUAccessFlags
+// because those can vary between sessions for the same logical resource.
+// This mirrors the CalcTexture2DDescHash pattern.
+static uint32_t CalcBufferDescHash(ID3D11Buffer *buf)
+{
+	if (!buf)
+		return 0;
+
+	D3D11_BUFFER_DESC desc;
+	buf->GetDesc(&desc);
+
+	// Hash only the stable, deterministic fields:
+	struct { UINT ByteWidth; UINT BindFlags; UINT StructureByteStride; } stable = {
+		desc.ByteWidth,
+		desc.BindFlags,
+		desc.StructureByteStride,
+	};
+	return crc32c_hw(0, &stable, sizeof(stable));
+}
+
+// Cache for buffer region data hashes so we only pay the staging readback
+// cost once per unique (buffer pointer, byte offset, byte size) tuple per
+// session.  We never need to invalidate this for VB/IB geometry because
+// packed vertex/index data is written once and never changed.
+struct BufferRegionKey {
+	ID3D11Buffer *buf;
+	UINT offset;
+	UINT size;
+	bool operator==(const BufferRegionKey &o) const {
+		return buf == o.buf && offset == o.offset && size == o.size;
+	}
+};
+struct BufferRegionKeyHash {
+	size_t operator()(const BufferRegionKey &k) const {
+		size_t seed = (size_t)(uintptr_t)k.buf;
+		seed ^= std::hash<UINT>()(k.offset) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+		seed ^= std::hash<UINT>()(k.size)   + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+		return seed;
+	}
+};
+static std::unordered_map<BufferRegionKey, uint32_t, BufferRegionKeyHash> gBufferRegionHashCache;
+
+// Reads raw bytes from a GPU buffer at [offset, offset+size) using a staging
+// copy and computes a crc32c hash of that data.  Results are cached so the
+// GPU readback only happens once per unique region per session.  Falls back
+// to the descriptor hash if staging fails.
+static uint32_t HashBufferRegion(
+	ID3D11Device *device,
+	ID3D11DeviceContext *context,
+	ID3D11Buffer *buf,
+	UINT offset,
+	UINT size)
+{
+	if (!buf || !device || !context || size == 0)
+		return CalcBufferDescHash(buf);
+
+	// Clamp to buffer bounds
+	D3D11_BUFFER_DESC src_desc;
+	buf->GetDesc(&src_desc);
+	if (offset >= src_desc.ByteWidth)
+		return CalcBufferDescHash(buf);
+	size = min(size, src_desc.ByteWidth - offset);
+
+	BufferRegionKey key = { buf, offset, size };
+
+	// Check cache first — no lock needed here since hunting is single-threaded
+	// relative to this call path, but we guard with the critical section to
+	// be safe with any background threads.
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	auto it = gBufferRegionHashCache.find(key);
+	if (it != gBufferRegionHashCache.end()) {
+		uint32_t cached = it->second;
+		LeaveCriticalSection(&G->mCriticalSection);
+		return cached;
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	// Create a minimal staging buffer just large enough for the region
+	D3D11_BUFFER_DESC stage_desc = {};
+	stage_desc.ByteWidth      = size;
+	stage_desc.Usage          = D3D11_USAGE_STAGING;
+	stage_desc.BindFlags      = 0;
+	stage_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+	stage_desc.MiscFlags      = 0;
+
+	ID3D11Buffer *staging = NULL;
+	HRESULT hr = device->CreateBuffer(&stage_desc, NULL, &staging);
+	if (FAILED(hr))
+		return CalcBufferDescHash(buf);
+
+	// Copy only the needed region from the source buffer
+	D3D11_BOX box = { offset, 0, 0, offset + size, 1, 1 };
+	context->CopySubresourceRegion(staging, 0, 0, 0, 0, buf, 0, &box);
+
+	D3D11_MAPPED_SUBRESOURCE mapped = {};
+	hr = context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
+	if (FAILED(hr)) {
+		staging->Release();
+		return CalcBufferDescHash(buf);
+	}
+
+	uint32_t hash = crc32c_hw(0, mapped.pData, size);
+
+	context->Unmap(staging, 0);
+	staging->Release();
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	gBufferRegionHashCache[key] = hash;
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	return hash;
+}
+
+// Computes a fully deterministic, session-stable hash for a vertex buffer
+// binding by hashing the actual vertex data bytes at the bound region.
+// Uses a fixed-size probe (enough vertices to uniquely identify the mesh)
+// so we don't need the draw-call vertex count.
+// device/context are required for the staging readback.
+uint32_t GetVBHash(ID3D11Buffer *buf, UINT offset, UINT stride,
+	ID3D11Device *device, ID3D11DeviceContext *context)
+{
+	if (!buf) return 0;
+	if (!device || !context)
+		return GetCombinedResourceHash(CalcBufferDescHash(buf), offset, stride);
+
+	// Hash enough bytes to uniquely identify the mesh section: at least 8
+	// full vertices, or 256 bytes, whichever is larger — clamped to the
+	// buffer.  Stride discriminates different vertex formats in the same
+	// buffer.  The offset is NOT part of the hash so it can change freely
+	// between sessions as the game repacks its geometry.
+	UINT probe = (stride > 0) ? max(stride * 8u, 256u) : 256u;
+	uint32_t data_hash = HashBufferRegion(device, context, buf, offset, probe);
+	return GetCombinedResourceHash(data_hash, stride, 0);
+}
+
+// Same as GetVBHash but for index buffers.
+uint32_t GetIBHash(ID3D11Buffer *buf, UINT offset, DXGI_FORMAT format,
+	ID3D11Device *device, ID3D11DeviceContext *context)
+{
+	if (!buf) return 0;
+	UINT index_size = (format == DXGI_FORMAT_R32_UINT) ? 4 : 2;
+	if (!device || !context)
+		return GetCombinedResourceHash(CalcBufferDescHash(buf), offset, (UINT)format);
+
+	// Hash at least 64 indices worth of data for reliable identification
+	UINT probe = index_size * 64u;
+	uint32_t data_hash = HashBufferRegion(device, context, buf, offset, probe);
+	return GetCombinedResourceHash(data_hash, (UINT)format, 0);
+}
+
 uint32_t CalcTexture1DDataHash(
 	const D3D11_TEXTURE1D_DESC *pDesc,
 	const D3D11_SUBRESOURCE_DATA *pInitialData)

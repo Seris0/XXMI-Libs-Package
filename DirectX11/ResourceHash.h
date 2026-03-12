@@ -197,6 +197,17 @@ uint32_t GetResourceHash(ID3D11Resource *resource);
 // slots/offsets/strides gets a unique, stable 8-digit hash for hunting.
 uint32_t GetCombinedResourceHash(uint32_t base_hash, UINT a, UINT b = 0);
 
+// Session-stable hunting hashes for vertex and index buffers.
+// These hash the actual data bytes at the bound region using a staging GPU
+// readback (results are cached per session), so the hash is identical across
+// game restarts even when the game repacks its geometry buffer at a different
+// byte offset each launch.  Pass device/context as NULL to fall back to a
+// descriptor-only hash (no GPU readback).
+uint32_t GetVBHash(ID3D11Buffer *buf, UINT offset, UINT stride,
+	ID3D11Device *device = NULL, ID3D11DeviceContext *context = NULL);
+uint32_t GetIBHash(ID3D11Buffer *buf, UINT offset, DXGI_FORMAT format,
+	ID3D11Device *device = NULL, ID3D11DeviceContext *context = NULL);
+
 void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 		ID3D11Resource *src, UINT srcSubresource, char type,
 		UINT DstX, UINT DstY, UINT DstZ, const D3D11_BOX *SrcBox);

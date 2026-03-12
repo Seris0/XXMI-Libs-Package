@@ -201,6 +201,21 @@ protected:
 	// These are per-context, moved from globals.h:
 	uint32_t mCurrentVertexBuffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
 	uint32_t mCurrentIndexBuffer; // Only valid while hunting=1
+
+	// Raw binding info stored at IASet* time so BeforeDraw can compute
+	// data-based hashes with the correct device/context available.
+	struct VBBinding {
+		ID3D11Buffer *buf;
+		UINT offset;
+		UINT stride;
+		bool dirty; // true = hash not yet computed for this binding
+	} mCurrentVBBindings[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+	struct IBBinding {
+		ID3D11Buffer *buf;
+		UINT offset;
+		DXGI_FORMAT format;
+		bool dirty;
+	} mCurrentIBBinding;
 	std::vector<ID3D11Resource *> mCurrentRenderTargets;
 	ID3D11Resource *mCurrentDepthTarget;
 	UINT mCurrentPSUAVStartSlot;
@@ -213,6 +228,20 @@ public:
 	HackerDevice* GetHackerDevice();
 	void Bind3DMigotoResources();
 	void InitIniParams();
+
+	// Called from CommandList SetResource when a VB/IB is replaced via a
+	// [TextureOverride] command list, so that hunting state stays in sync
+	// with the actual pipeline state after a bypass of IASetVertexBuffers.
+	void UpdateCurrentVB(UINT slot, uint32_t hash) {
+		if (slot < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT) {
+			mCurrentVertexBuffers[slot] = hash;
+			mCurrentVBBindings[slot].dirty = false; // hash already computed
+		}
+	}
+	void UpdateCurrentIB(uint32_t hash) {
+		mCurrentIndexBuffer = hash;
+		mCurrentIBBinding.dirty = false;
+	}
 	ID3D11DeviceContext1* GetPossiblyHookedOrigContext1();
 	ID3D11DeviceContext1* GetPassThroughOrigContext1();
 	void HookContext();

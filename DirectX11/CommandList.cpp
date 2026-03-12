@@ -5859,11 +5859,37 @@ void ResourceCopyTarget::SetResource(
 	case ResourceCopyTargetType::VERTEX_BUFFER:
 		buf = (ID3D11Buffer*)res;
 		mOrigContext1->IASetVertexBuffers(slot, 1, &buf, &stride, &offset);
+		// IASetVertexBuffers above goes to mOrigContext1, bypassing
+		// HackerContext::IASetVertexBuffers, so mCurrentVertexBuffers[slot]
+		// is NOT updated automatically.  We must update it manually so that
+		// BeforeDraw hunting comparisons and frame analysis keep working
+		// with the replacement buffer's combined hash (offset+stride).
+		if (state->mHackerContext && res && G->hunting == HUNTING_MODE_ENABLED) {
+			ID3D11Device *dev = NULL;
+			mOrigContext1->GetDevice(&dev);
+			uint32_t combined = GetVBHash((ID3D11Buffer*)res, offset, stride, dev, mOrigContext1);
+			if (dev) dev->Release();
+			state->mHackerContext->UpdateCurrentVB(slot, combined);
+			EnterCriticalSectionPretty(&G->mCriticalSection);
+			G->mVisitedVertexBuffers.insert(combined);
+			LeaveCriticalSection(&G->mCriticalSection);
+		}
 		return;
 
 	case ResourceCopyTargetType::INDEX_BUFFER:
 		buf = (ID3D11Buffer*)res;
 		mOrigContext1->IASetIndexBuffer(buf, format, offset);
+		// Same bypass issue as VB above - update mCurrentIndexBuffer manually.
+		if (state->mHackerContext && res && G->hunting == HUNTING_MODE_ENABLED) {
+			ID3D11Device *dev = NULL;
+			mOrigContext1->GetDevice(&dev);
+			uint32_t combined = GetIBHash((ID3D11Buffer*)res, offset, format, dev, mOrigContext1);
+			if (dev) dev->Release();
+			state->mHackerContext->UpdateCurrentIB(combined);
+			EnterCriticalSectionPretty(&G->mCriticalSection);
+			G->mVisitedIndexBuffers.insert(combined);
+			LeaveCriticalSection(&G->mCriticalSection);
+		}
 		break;
 
 	case ResourceCopyTargetType::STREAM_OUTPUT:
@@ -6089,7 +6115,10 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 		if (buf) buf->Release();
 		D3D11_BUFFER_DESC buf_desc = {};
 		((ID3D11Buffer*)resource)->GetDesc(&buf_desc);
-		hash = GetCombinedResourceHash(GetResourceHash(resource), offset, stride);
+		ID3D11Device *dev = NULL;
+		state->mOrigContext1->GetDevice(&dev);
+		hash = GetVBHash((ID3D11Buffer*)resource, offset, stride, dev, state->mOrigContext1);
+		if (dev) dev->Release();
 		find_texture_overrides<D3D11_BUFFER_DESC>(hash, &buf_desc, matches, state->call_info);
 	} else if (type == ResourceCopyTargetType::INDEX_BUFFER) {
 		ID3D11Buffer *buf = NULL;
@@ -6099,7 +6128,10 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 		if (buf) buf->Release();
 		D3D11_BUFFER_DESC buf_desc = {};
 		((ID3D11Buffer*)resource)->GetDesc(&buf_desc);
-		hash = GetCombinedResourceHash(GetResourceHash(resource), offset, (UINT)fmt);
+		ID3D11Device *dev = NULL;
+		state->mOrigContext1->GetDevice(&dev);
+		hash = GetIBHash((ID3D11Buffer*)resource, offset, fmt, dev, state->mOrigContext1);
+		if (dev) dev->Release();
 		find_texture_overrides<D3D11_BUFFER_DESC>(hash, &buf_desc, matches, state->call_info);
 	} else {
 		find_texture_overrides_for_resource(resource, matches, state->call_info);

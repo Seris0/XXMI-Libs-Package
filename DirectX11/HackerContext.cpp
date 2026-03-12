@@ -72,6 +72,8 @@ HackerContext::HackerContext(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pCon
 
 	memset(mCurrentVertexBuffers, 0, sizeof(mCurrentVertexBuffers));
 	mCurrentIndexBuffer = 0;
+	memset(mCurrentVBBindings, 0, sizeof(mCurrentVBBindings));
+	memset(&mCurrentIBBinding, 0, sizeof(mCurrentIBBinding));
 	mCurrentVertexShader = 0;
 	mCurrentVertexShaderHandle = NULL;
 	mCurrentPixelShader = 0;
@@ -726,6 +728,41 @@ void HackerContext::BeforeDraw(DrawContext &data)
 		UINT selectedRenderTargetPos;
 		UINT i;
 
+		// Resolve any dirty VB/IB bindings into stable data-based hashes.
+		// This is done here (not in IASetVertexBuffers/IASetIndexBuffer) so
+		// that we have access to mOrigDevice1/mOrigContext1 for the staging
+		// readback, and so the hash reflects the exact data in use for this
+		// draw call rather than whatever was last uploaded to the buffer.
+		// The staging readback is cached per (buf, offset, size) so the GPU
+		// stall only happens once per unique geometry region per session.
+		{
+			ID3D11Device *dev = NULL;
+			mOrigContext1->GetDevice(&dev);
+			for (i = 0; i < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT; i++) {
+				if (!mCurrentVBBindings[i].dirty)
+					continue;
+				VBBinding &b = mCurrentVBBindings[i];
+				mCurrentVertexBuffers[i] = GetVBHash(b.buf, b.offset, b.stride, dev, mOrigContext1);
+				b.dirty = false;
+				if (mCurrentVertexBuffers[i]) {
+					EnterCriticalSectionPretty(&G->mCriticalSection);
+					G->mVisitedVertexBuffers.insert(mCurrentVertexBuffers[i]);
+					LeaveCriticalSection(&G->mCriticalSection);
+				}
+			}
+			if (mCurrentIBBinding.dirty) {
+				IBBinding &b = mCurrentIBBinding;
+				mCurrentIndexBuffer = GetIBHash(b.buf, b.offset, b.format, dev, mOrigContext1);
+				b.dirty = false;
+				if (mCurrentIndexBuffer) {
+					EnterCriticalSectionPretty(&G->mCriticalSection);
+					G->mVisitedIndexBuffers.insert(mCurrentIndexBuffer);
+					LeaveCriticalSection(&G->mCriticalSection);
+				}
+			}
+			if (dev) dev->Release();
+		}
+
 		// In some cases stat collection can have a significant
 		// performance impact or may result in a runaway memory leak,
 		// so only do it if dump_usage is enabled.
@@ -1327,17 +1364,17 @@ STDMETHODIMP_(void) HackerContext::IASetVertexBuffers(THIS_
 		for (UINT i = StartSlot; (i < StartSlot + NumBuffers) && (i < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT); i++) {
 			UINT idx = i - StartSlot; // correct 0-based index into the caller's arrays
 			if (ppVertexBuffers && ppVertexBuffers[idx]) {
-				uint32_t base = GetResourceHash(ppVertexBuffers[idx]);
-				// Mix in the byte offset and stride so that the same buffer bound
-				// at a different offset (different mesh packed inside the same VB)
-				// or with a different vertex stride gets a unique hash per draw.
-				// This mirrors exactly how IASetIndexBuffer handles the IB case.
-				UINT offset = pOffsets ? pOffsets[idx] : 0;
-				UINT stride = pStrides ? pStrides[idx] : 0;
-				mCurrentVertexBuffers[i] = GetCombinedResourceHash(base, offset, stride);
-				G->mVisitedVertexBuffers.insert(mCurrentVertexBuffers[i]);
-			} else
+				// Store raw binding info. Hash is computed lazily in BeforeDraw
+				// using actual data staging so it is stable across sessions.
+				mCurrentVBBindings[i].buf    = ppVertexBuffers[idx];
+				mCurrentVBBindings[i].offset = pOffsets ? pOffsets[idx] : 0;
+				mCurrentVBBindings[i].stride = pStrides ? pStrides[idx] : 0;
+				mCurrentVBBindings[i].dirty  = true;
+				mCurrentVertexBuffers[i] = 0; // filled in by BeforeDraw
+			} else {
+				mCurrentVBBindings[i] = {};
 				mCurrentVertexBuffers[i] = 0;
+			}
 		}
 		LeaveCriticalSection(&G->mCriticalSection);
 	 }
@@ -2822,17 +2859,13 @@ STDMETHODIMP_(void) HackerContext::IASetIndexBuffer(THIS_
 	// command list checks the hash on demand only when it is needed
 	mCurrentIndexBuffer = 0;
 	if (pIndexBuffer && G->hunting == HUNTING_MODE_ENABLED) {
-		uint32_t base = GetResourceHash(pIndexBuffer);
-		// Mix in Offset and Format so that the same buffer bound as an IB
-		// at a different byte offset or with a different index format gets
-		// a distinct hash in the hunt.
-		mCurrentIndexBuffer = GetCombinedResourceHash(base, Offset, (UINT)Format);
-		if (mCurrentIndexBuffer) {
-			// When hunting, save this as a visited index buffer to cycle through.
-			EnterCriticalSectionPretty(&G->mCriticalSection);
-			G->mVisitedIndexBuffers.insert(mCurrentIndexBuffer);
-			LeaveCriticalSection(&G->mCriticalSection);
-		}
+		// Store raw binding; hash computed in BeforeDraw from actual data.
+		mCurrentIBBinding.buf    = pIndexBuffer;
+		mCurrentIBBinding.offset = Offset;
+		mCurrentIBBinding.format = Format;
+		mCurrentIBBinding.dirty  = true;
+	} else {
+		mCurrentIBBinding = {};
 	}
 }
 

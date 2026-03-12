@@ -2523,7 +2523,8 @@ void FrameAnalysisContext::DumpVBs(DrawCallInfo *call_info, ID3D11Buffer *staged
 			goto continue_release;
 
 		hr = FrameAnalysisFilename(filename, MAX_PATH, false, L"vb", NULL, i, buffers[i],
-				GetCombinedResourceHash(GetResourceHash(buffers[i]), offsets[i], strides[i]));
+				GetVBHash(buffers[i], offsets[i], strides[i],
+					GetHackerDevice()->GetPassThroughOrigDevice1(), GetPassThroughOrigContext1()));
 		if (SUCCEEDED(hr)) {
 			DumpBuffer(buffers[i], filename,
 				FrameAnalysisOptions::DUMP_VB, i,
@@ -2562,7 +2563,8 @@ void FrameAnalysisContext::DumpIB(DrawCallInfo *call_info, ID3D11Buffer **staged
 	GetPassThroughOrigContext1()->IAGetPrimitiveTopology(&topology);
 
 	hr = FrameAnalysisFilename(filename, MAX_PATH, false, L"ib", NULL, -1, buffer,
-			GetCombinedResourceHash(GetResourceHash(buffer), *offset, (UINT)*format));
+			GetIBHash(buffer, *offset, *format,
+				GetHackerDevice()->GetPassThroughOrigDevice1(), GetPassThroughOrigContext1()));
 	if (SUCCEEDED(hr)) {
 		DumpBuffer(buffer, filename,
 				FrameAnalysisOptions::DUMP_IB, -1,
