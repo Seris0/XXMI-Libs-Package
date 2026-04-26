@@ -29,6 +29,9 @@ DWORD castStrLen(const char* string)
 	return (DWORD)strlen(string);
 }
 
+static const wchar_t *AUTO_DECOMPILE_VS_DIR = L"Decompiled_VS";
+static const wchar_t *AUTO_DECOMPILE_PS_DIR = L"Decompiled_PS";
+
 static void DumpUsageResourceInfo(HANDLE f, std::set<uint32_t> *hashes, char *tag)
 {
 	std::set<uint32_t>::iterator orig_hash;
@@ -166,6 +169,10 @@ static void DumpUsageRegister(HANDLE f, char *tag, int id, const ResourceSnapsho
 
 	if (info.orig_hash != info.hash) {
 		sprintf(buf, " orig_hash=%08lx", info.orig_hash);
+		WriteFile(f, buf, castStrLen(buf), &written, 0);
+	}
+	if (info.perceptual_hash) {
+		sprintf(buf, " phash=%016llx", info.perceptual_hash);
 		WriteFile(f, buf, castStrLen(buf), &written, 0);
 	}
 
@@ -329,7 +336,8 @@ static void MarkingScreenShots(HackerDevice *device, HashType hash, char *short_
 
 //--------------------------------------------------------------------------------------------------
 
-// This is pretty heavyweight obviously, so it is only being done during Mark operations.
+// This is pretty heavyweight obviously, so it is only done on explicit mark
+// operations or the first passive encounter of a shader.
 // Todo: another copy/paste job, we really need some subroutines, utility library.
 
 static string Decompile(ID3DBlob *pShaderByteCode, string *asmText)
@@ -354,6 +362,27 @@ static string Decompile(ID3DBlob *pShaderByteCode, string *asmText)
 	}
 
 	return decompiledCode;
+}
+
+static bool StoreHLSLAndAsm(const wchar_t *fullName, string *asmText, string *hlslText)
+{
+	FILE *fw = NULL;
+
+	wfopen_ensuring_access(&fw, fullName, L"wb");
+	if (!fw)
+	{
+		LogInfoW(L"    error storing decompiled shader to %s\n", fullName);
+		return false;
+	}
+
+	fwrite(hlslText->c_str(), 1, hlslText->size(), fw);
+
+	fprintf_s(fw, "\n\n/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
+	fwrite(asmText->c_str(), 1, asmText->size(), fw);
+	fprintf_s(fw, "\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/\n");
+
+	fclose(fw);
+	return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -836,6 +865,16 @@ err:
 	goto out;
 }
 
+static void RemoveMarkedShaderCacheFiles(UINT64 hash, const std::wstring &shaderType)
+{
+	wchar_t path[MAX_PATH];
+
+	swprintf_s(path, MAX_PATH, L"%ls\\%016llx-%ls_replace.bin", G->SHADER_PATH, hash, shaderType.c_str());
+	DeleteFile(path);
+	swprintf_s(path, MAX_PATH, L"%ls\\%016llx-%ls.bin", G->SHADER_PATH, hash, shaderType.c_str());
+	DeleteFile(path);
+}
+
 static bool WriteASM(string *asmText, string *hlslText, string *errText,
 		UINT64 hash, OriginalShaderInfo shader_info, HackerDevice *device, wstring *tagline = NULL)
 {
@@ -884,7 +923,14 @@ static bool WriteASM(string *asmText, string *hlslText, string *errText,
 
 	// Lastly, reload the shader generated, to check for decompile errors, set it as the active
 	// shader code, in case there are visual errors, and make it the match the code in the file.
-	return ReloadShader(G->SHADER_PATH, fileName, device, NULL);
+	bool ret = ReloadShader(G->SHADER_PATH, fileName, device, NULL);
+
+	// Mark-generated files should not leave behind compiled binaries in
+	// ShaderFixes, otherwise deleting the source file later can still
+	// leave a stale override active on the next launch.
+	RemoveMarkedShaderCacheFiles(hash, shader_info.shaderType);
+
+	return ret;
 }
 
 // Write the decompiled text as HLSL source code to the txt file.
@@ -901,7 +947,6 @@ static bool WriteHLSL(string *asmText, string *hlslText, string *errText,
 {
 	wchar_t fileName[MAX_PATH];
 	wchar_t fullName[MAX_PATH];
-	FILE *fw;
 	bool ret;
 
 	// Try to decompile the current byte code into HLSL:
@@ -915,33 +960,192 @@ static bool WriteHLSL(string *asmText, string *hlslText, string *errText,
 
 	swprintf_s(fileName, MAX_PATH, L"%016llx-%ls_replace.txt", hash, shader_info.shaderType.c_str());
 	swprintf_s(fullName, MAX_PATH, L"%ls\\%ls", G->SHADER_PATH, fileName);
-	wfopen_ensuring_access(&fw, fullName, L"wb");
-	if (!fw)
-	{
-		LogInfoW(L"    error storing marked shader to %s\n", fullName);
+	if (!StoreHLSLAndAsm(fullName, asmText, hlslText))
 		return false;
-	}
 
 	LogInfoW(L"    storing patched shader to %s\n", fullName);
-
-	fwrite(hlslText->c_str(), 1, hlslText->size(), fw);
-
-	fprintf_s(fw, "\n\n/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n");
-	fwrite(asmText->c_str(), 1, asmText->size(), fw);
-	fprintf_s(fw, "\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/\n");
-
-	fclose(fw);
 
 	// Lastly, reload the shader generated, to check for decompile errors, set it as the active
 	// shader code, in case there are visual errors, and make it the match the code in the file.
 	ret = ReloadShader(G->SHADER_PATH, fileName, device, errText);
 
+	// Mark-generated files should not leave behind compiled binaries in
+	// ShaderFixes, otherwise deleting the source file later can still
+	// leave a stale override active on the next launch.
+	RemoveMarkedShaderCacheFiles(hash, shader_info.shaderType);
+
 	if (!ret && remove_failed) {
+		swprintf_s(fullName, MAX_PATH, L"%ls\\%ls", G->SHADER_PATH, fileName);
 		LogInfo("    removing shader that failed to reload: %S\n", fullName);
 		DeleteFile(fullName);
 	}
 
 	return ret;
+}
+
+static bool WriteHLSLToDirectory(string *asmText, string *hlslText,
+		UINT64 hash, OriginalShaderInfo shader_info, const wchar_t *directory)
+{
+	wchar_t fullName[MAX_PATH];
+
+	*hlslText = Decompile(shader_info.byteCode, asmText);
+	if (hlslText->empty())
+		return false;
+
+	swprintf_s(fullName, MAX_PATH, L"%ls\\%016llx-%ls.txt", directory, hash, shader_info.shaderType.c_str());
+	LogInfoW(L"    storing passively decompiled shader to %s\n", fullName);
+	return StoreHLSLAndAsm(fullName, asmText, hlslText);
+}
+
+static bool GetPassiveDecompileRoot(wchar_t *path)
+{
+	wchar_t *sep = NULL;
+
+	if (G->SHADER_PATH[0]) {
+		wcscpy_s(path, MAX_PATH, G->SHADER_PATH);
+		while (*path && (path[wcslen(path) - 1] == L'\\' || path[wcslen(path) - 1] == L'/'))
+			path[wcslen(path) - 1] = 0;
+
+		sep = wcsrchr(path, L'\\');
+		if (!sep)
+			sep = wcsrchr(path, L'/');
+		if (sep) {
+			*sep = 0;
+			if (path[1] == L':' && !path[2])
+				wcscat_s(path, MAX_PATH, L"\\");
+			return true;
+		}
+	}
+
+	if (G->CUSTOM_DUMP_PATH[0]) {
+		wcscpy_s(path, MAX_PATH, G->CUSTOM_DUMP_PATH);
+		return true;
+	}
+
+	if (!GetModuleFileName(migoto_handle, path, MAX_PATH))
+		return false;
+
+	sep = wcsrchr(path, L'\\');
+	if (!sep)
+		sep = wcsrchr(path, L'/');
+	if (!sep)
+		return false;
+
+	sep[1] = 0;
+	return true;
+}
+
+static bool GetPassiveDecompileDirectory(const wchar_t *folderName, wchar_t *path)
+{
+	size_t len;
+
+	if (!GetPassiveDecompileRoot(path))
+		return false;
+
+	len = wcslen(path);
+	if (len && path[len - 1] != L'\\' && path[len - 1] != L'/')
+		wcscat_s(path, MAX_PATH, L"\\");
+	wcscat_s(path, MAX_PATH, folderName);
+
+	return CreateDirectoryEnsuringAccess(path) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static void GetPassiveDecompilePath(wchar_t *path, const wchar_t *directory,
+		UINT64 hash, const wchar_t *shaderType)
+{
+	swprintf_s(path, MAX_PATH, L"%ls\\%016llx-%ls.txt", directory, hash, shaderType);
+}
+
+static UINT64 ResolveShaderHashForPassiveDecompile(ID3D11DeviceChild *shader, UINT64 shader_hash)
+{
+	ShaderMap::iterator hash_it;
+
+	if (shader_hash && shader_hash != UINT64_MAX)
+		return shader_hash;
+	if (!shader)
+		return 0;
+
+	hash_it = lookup_shader_hash(shader);
+	if (hash_it == G->mShaders.end())
+		return 0;
+
+	return hash_it->second;
+}
+
+static void PassiveDecompileShader(ID3D11DeviceChild *shader, UINT64 shader_hash,
+		const wchar_t *folderName, std::unordered_set<UINT64> *decompiled_shaders)
+{
+	OriginalShaderInfo shader_info = {};
+	ID3DBlob *bytecode = NULL;
+	ShaderReloadMap::iterator reload_it;
+	UINT64 resolved_hash;
+	wchar_t directory[MAX_PATH];
+	wchar_t fullName[MAX_PATH];
+	string asmText, hlslText;
+
+	if (!shader || !decompiled_shaders)
+		return;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	resolved_hash = ResolveShaderHashForPassiveDecompile(shader, shader_hash);
+	if (!resolved_hash || decompiled_shaders->find(resolved_hash) != decompiled_shaders->end()) {
+		LeaveCriticalSection(&G->mCriticalSection);
+		return;
+	}
+
+	reload_it = lookup_reloaded_shader(shader);
+	if (reload_it == G->mReloadedShaders.end() || !reload_it->second.byteCode) {
+		LeaveCriticalSection(&G->mCriticalSection);
+		return;
+	}
+
+	decompiled_shaders->insert(resolved_hash);
+	shader_info = reload_it->second;
+	bytecode = shader_info.byteCode;
+	bytecode->AddRef();
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	shader_info.byteCode = bytecode;
+
+	if (!GetPassiveDecompileDirectory(folderName, directory)) {
+		LogInfoW(L"    unable to create passive decompile directory for %016llx-%ls\n",
+				resolved_hash, shader_info.shaderType.c_str());
+		goto out;
+	}
+
+	GetPassiveDecompilePath(fullName, directory, resolved_hash, shader_info.shaderType.c_str());
+	if (GetFileAttributes(fullName) != INVALID_FILE_ATTRIBUTES)
+		goto out;
+
+	asmText = BinaryToAsmText(shader_info.byteCode->GetBufferPointer(), shader_info.byteCode->GetBufferSize(), false);
+	if (asmText.empty()) {
+		LogInfo("    passive decompile skipped: failed to disassemble %016llx-%S\n",
+				resolved_hash, shader_info.shaderType.c_str());
+		goto out;
+	}
+
+	if (!WriteHLSLToDirectory(&asmText, &hlslText, resolved_hash, shader_info, directory)) {
+		LogInfo("    passive decompile failed for %016llx-%S\n",
+				resolved_hash, shader_info.shaderType.c_str());
+	}
+
+out:
+	bytecode->Release();
+}
+
+void PassiveDecompileDrawShaders(HackerDevice *device,
+		ID3D11VertexShader *vertex_shader, UINT64 vertex_shader_hash,
+		ID3D11PixelShader *pixel_shader, UINT64 pixel_shader_hash)
+{
+	(void)device;
+
+	if (G->decompile_auto_vs)
+		PassiveDecompileShader(vertex_shader, vertex_shader_hash,
+				AUTO_DECOMPILE_VS_DIR, &G->mAutoDecompiledVertexShaders);
+
+	if (G->decompile_auto_ps)
+		PassiveDecompileShader(pixel_shader, pixel_shader_hash,
+				AUTO_DECOMPILE_PS_DIR, &G->mAutoDecompiledPixelShaders);
 }
 
 static bool check_shader_file_already_exists(wchar_t *path, bool bin)
@@ -1351,7 +1555,7 @@ static void NextMarkingMode(HackerDevice *device, void *private_data)
 
 template <typename ItemType>
 static void HuntNext(char *type, std::set<ItemType> *visited,
-		ItemType *selected, int *selectedPos)
+	ItemType *selected, int *selectedPos)
 {
 	if (G->hunting != HUNTING_MODE_ENABLED)
 		return;
@@ -1376,12 +1580,21 @@ static void HuntNext(char *type, std::set<ItemType> *visited,
 				*selected = *visited->begin();
 			}
 			LogInfo("> traversing to next %s #%d. Number of %ss in frame: %d\n",
-					type, *selectedPos, type, size);
+				type, *selectedPos, type, size);
+		} else if (G->overlay_buffer_hash_lifetime >= 0 && *selected && (strcmp(type, "vertex buffer") == 0 || strcmp(type, "index buffer") == 0)) {
+			auto it = visited->lower_bound(*selected);
+			if (it == visited->end()) {
+				it = visited->begin();
+				*selectedPos = 0;
+			} else {
+				*selectedPos = std::distance(visited->begin(), it);
+			}
+			*selected = *it;
 		} else {
 			*selectedPos = 0;
 			*selected = *visited->begin();
 			LogInfo("> starting at %s #%d. Number of %ss in frame: %d\n",
-					type, *selectedPos, type, size);
+				type, *selectedPos, type, size);
 		}
 	}
 out:
@@ -1395,6 +1608,7 @@ static void NextVertexBuffer(HackerDevice *device, void *private_data)
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	G->mSelectedVertexBuffer_PixelShader.clear();
 	G->mSelectedVertexBuffer_VertexShader.clear();
+	G->gVisitedVertexBufferSlotIds.clear();
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 static void NextIndexBuffer(HackerDevice *device, void *private_data)
@@ -1404,6 +1618,27 @@ static void NextIndexBuffer(HackerDevice *device, void *private_data)
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	G->mSelectedIndexBuffer_PixelShader.clear();
 	G->mSelectedIndexBuffer_VertexShader.clear();
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+static void NextVertexBufferSlot(HackerDevice* device, void* private_data)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+
+	int32_t& id = G->gSelectedVertexBufferSlotId;
+	uint32_t count = D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
+
+	if (id < 0)
+		id = 0;
+	else if ((uint32_t)id >= count - 1)
+		id = -1;
+	else
+		id++;
+
+	G->mVisitedVertexBuffers.clear();
+	G->gVisitedVertexBufferSlotIds.clear();
+	G->mSelectedVertexBufferPos = -1;
+	G->gResetSelectedVertexBufferSlotId = true;
+
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 static void NextPixelShader(HackerDevice *device, void *private_data)
@@ -1474,6 +1709,16 @@ static void HuntPrev(char *type, std::set<ItemType> *visited,
 			}
 			LogInfo("> traversing to previous %s shader #%d. Number of %s shaders in frame: %d\n",
 					type, *selectedPos, type, size);
+		} else if (G->overlay_buffer_hash_lifetime >= 0 && *selected && (strcmp(type, "vertex buffer") == 0 || strcmp(type, "index buffer") == 0)) {
+			auto it = visited->lower_bound(*selected);
+			if (it == visited->begin()) {
+				it = std::prev(visited->end());
+				*selectedPos = size - 1;
+			} else {
+				--it;
+				*selectedPos = std::distance(visited->begin(), it);
+			}
+			*selected = *it;
 		} else {
 			*selectedPos = size - 1;
 			*selected = *std::prev(end);
@@ -1487,17 +1732,52 @@ out:
 
 static void PrevVertexBuffer(HackerDevice *device, void *private_data)
 {
-	HuntPrev<uint32_t>("vertex buffer", &G->mVisitedVertexBuffers, &G->mSelectedVertexBuffer, &G->mSelectedVertexBufferPos);
-
+	if (G->mVisitedVertexBuffers.size() == 0 || G->mSelectedVertexBufferPos <= 0) {
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		G->mSelectedVertexBuffer = UINT32_MAX;
+		G->mSelectedVertexBufferPos = INT_MAX;
+		LeaveCriticalSection(&G->mCriticalSection);
+	}
+	else {
+		HuntPrev<uint32_t>("vertex buffer", &G->mVisitedVertexBuffers, &G->mSelectedVertexBuffer, &G->mSelectedVertexBufferPos);
+	}
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	G->mSelectedVertexBuffer_PixelShader.clear();
 	G->mSelectedVertexBuffer_VertexShader.clear();
+	G->gVisitedVertexBufferSlotIds.clear();
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+static void PrevVertexBufferSlot(HackerDevice* device, void* private_data)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+
+	int32_t& id = G->gSelectedVertexBufferSlotId;
+	uint32_t count = D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
+
+	if (id < 0)
+		id = count - 1;
+	else if (id == 0)
+		id = -1;
+	else
+		id--;
+
+	G->mVisitedVertexBuffers.clear();
+	G->gVisitedVertexBufferSlotIds.clear();
+	G->mSelectedVertexBufferPos = -1;
+	G->gResetSelectedVertexBufferSlotId = true;
+
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 static void PrevIndexBuffer(HackerDevice *device, void *private_data)
 {
-	HuntPrev<uint32_t>("index buffer", &G->mVisitedIndexBuffers, &G->mSelectedIndexBuffer, &G->mSelectedIndexBufferPos);
-
+	if (G->mVisitedIndexBuffers.size() == 0 || G->mSelectedIndexBufferPos <= 0) {
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		G->mSelectedIndexBuffer = UINT32_MAX;
+		G->mSelectedIndexBufferPos = INT_MAX;
+		LeaveCriticalSection(&G->mCriticalSection);
+	} else {
+		HuntPrev<uint32_t>("index buffer", &G->mVisitedIndexBuffers, &G->mSelectedIndexBuffer, &G->mSelectedIndexBufferPos);
+	}
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 	G->mSelectedIndexBuffer_PixelShader.clear();
 	G->mSelectedIndexBuffer_VertexShader.clear();
@@ -1850,6 +2130,7 @@ static void DoneHunting(HackerDevice *device, void *private_data)
 	G->mSelectedRenderTarget = ((ID3D11Resource *)-1);
 	G->mSelectedVertexBuffer = -1;
 	G->mSelectedVertexBufferPos = -1;
+	G->gSelectedVertexBufferSlotId = -1;
 	G->mSelectedIndexBuffer = -1;
 	G->mSelectedIndexBufferPos = -1;
 
@@ -1875,6 +2156,24 @@ static void ToggleHunting(HackerDevice *device, void *private_data)
 	LogInfo("> Hunting toggled to %d\n", G->hunting);
 }
 
+static void ToggleAutoDecompileVS(HackerDevice *device, void *private_data)
+{
+	G->decompile_auto_vs = !G->decompile_auto_vs;
+	LogInfo("Passive vertex shader decompilation %s\n",
+			G->decompile_auto_vs ? "enabled" : "disabled");
+	LogOverlay(LOG_NOTICE, "> passive vertex shader decompilation %s\n",
+			G->decompile_auto_vs ? "enabled" : "disabled");
+}
+
+static void ToggleAutoDecompilePS(HackerDevice *device, void *private_data)
+{
+	G->decompile_auto_ps = !G->decompile_auto_ps;
+	LogInfo("Passive pixel shader decompilation %s\n",
+			G->decompile_auto_ps ? "enabled" : "disabled");
+	LogOverlay(LOG_NOTICE, "> passive pixel shader decompilation %s\n",
+			G->decompile_auto_ps ? "enabled" : "disabled");
+}
+
 void ParseHuntingSection()
 {
 	intptr_t i;
@@ -1885,6 +2184,14 @@ void ParseHuntingSection()
 
 	LogInfo("[Hunting]\n");
 	G->hunting = GetIniInt(L"Hunting", L"hunting", 0, NULL);
+
+	// Number of frames a IB/VB buffer hash can remain in the overlay tracking
+	// cache without being encountered again before it is purged.
+	// If >= 0, stale hashes are removed by PurgeStaleVisitedBufferHashes() once per
+	// frame at the start of HackerSwapChain::Present().
+	G->overlay_buffer_hash_lifetime = GetIniInt(L"Hunting", L"overlay_buffer_hash_lifetime", -1, NULL);
+	if (G->track_region_hashes && G->overlay_buffer_hash_lifetime < 0)
+		G->overlay_buffer_hash_lifetime = 0;
 
 	// reload_config is registered even if not hunting - this allows us to
 	// turn on hunting in the ini dynamically without having to relaunch
@@ -1901,9 +2208,12 @@ void ParseHuntingSection()
 	RegisterIniKeyBinding(L"Hunting", L"monitor_performance", AnalysePerf, NULL, noRepeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"freeze_performance_monitor", FreezePerf, NULL, noRepeat, NULL);
 	Profiling::interval = (INT64)(GetIniFloat(L"Hunting", L"monitor_performance_interval", 1.0f, NULL) * 1000000);
+	RegisterIniKeyBinding(L"Hunting", L"decompile_vs", ToggleAutoDecompileVS, NULL, noRepeat, NULL);
+	RegisterIniKeyBinding(L"Hunting", L"decompile_ps", ToggleAutoDecompilePS, NULL, noRepeat, NULL);
 
-	// Don't register hunting keys when hard disabled. In this case the
-	// only way to turn hunting on is to edit the ini file and reload it.
+	// Don't register the interactive hunting keys when hard disabled. In
+	// this case the only way to turn hunting on is to edit the ini file
+	// and reload it. Passive decompile toggles are still registered above.
 	if (G->hunting == HUNTING_MODE_DISABLED) {
 		// There are glitches related to ShaderRegex processing for reloaded inis and shader compilation with `hunting = 0`
 		// So we better make sure that hunting mode won't actually be ever fully disabled
@@ -1937,6 +2247,9 @@ void ParseHuntingSection()
 	RegisterIniKeyBinding(L"Hunting", L"next_vertexbuffer", NextVertexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_vertexbuffer", PrevVertexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"mark_vertexbuffer", MarkVertexBuffer, NULL, noRepeat, NULL);
+
+	RegisterIniKeyBinding(L"Hunting", L"next_vertexbuffer_slot", NextVertexBufferSlot, NULL, repeat, NULL);
+	RegisterIniKeyBinding(L"Hunting", L"previous_vertexbuffer_slot", PrevVertexBufferSlot, NULL, repeat, NULL);
 
 	RegisterIniKeyBinding(L"Hunting", L"next_indexbuffer", NextIndexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_indexbuffer", PrevIndexBuffer, NULL, repeat, NULL);
@@ -1994,4 +2307,66 @@ void ParseHuntingSection()
 	}
 
 	G->verbose_overlay = GetIniBool(L"Hunting", L"verbose_overlay", false, NULL);
+}
+
+void RegisterVisitedIndexBufferNoLock(uint32_t hash)
+{
+	if (!hash || hash == UINT32_MAX)
+		return;
+	G->mVisitedIndexBuffers.insert(hash);
+	if (G->overlay_buffer_hash_lifetime >= 0)
+		G->mVisitedIndexBuffersLastSeenFrame[hash] = G->frame_no;
+}
+
+void RegisterVisitedIndexBuffer(uint32_t hash)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	RegisterVisitedIndexBufferNoLock(hash);
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+void RegisterVisitedVertexBufferNoLock(uint32_t hash, uint32_t slot_id)
+{
+	if (!hash || hash == UINT32_MAX)
+		return;
+	if (G->gSelectedVertexBufferSlotId != -1 && slot_id != G->gSelectedVertexBufferSlotId) {
+		return;
+	}
+	G->mVisitedVertexBuffers.insert(hash);
+	if (G->overlay_buffer_hash_lifetime >= 0)
+		G->mVisitedVertexBuffersLastSeenFrame[hash] = G->frame_no;
+}
+
+void RegisterVisitedVertexBuffer(uint32_t hash, uint32_t slot_id)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	RegisterVisitedVertexBufferNoLock(hash, slot_id);
+	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+static void PurgeStaleBuffers(std::set<uint32_t>* hashes, std::unordered_map<uint32_t, unsigned>* lastSeenFrames, uint32_t* selectedHash, int* selectedPos)
+{
+
+	for (auto it = lastSeenFrames->begin(); it != lastSeenFrames->end(); )
+	{
+		uint32_t hash = it->first;
+		unsigned last_frame = it->second;
+
+		bool stale = (G->frame_no - last_frame) > (unsigned)G->overlay_buffer_hash_lifetime;
+
+		if (stale) {
+			hashes->erase(hash);
+			it = lastSeenFrames->erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+void PurgeStaleVisitedBufferHashes(HackerDevice* device)
+{
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	PurgeStaleBuffers(&G->mVisitedVertexBuffers, &G->mVisitedVertexBuffersLastSeenFrame, &G->mSelectedVertexBuffer, &G->mSelectedVertexBufferPos);
+	PurgeStaleBuffers(&G->mVisitedIndexBuffers, &G->mVisitedIndexBuffersLastSeenFrame, &G->mSelectedIndexBuffer, &G->mSelectedIndexBufferPos);
+	LeaveCriticalSection(&G->mCriticalSection);
 }

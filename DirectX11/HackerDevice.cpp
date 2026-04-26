@@ -1948,6 +1948,7 @@ static void override_resource_desc(D3D11_TEXTURE3D_DESC *desc, TextureOverride *
 
 template <typename DescType>
 static const DescType* process_texture_override(uint32_t hash,
+		uint64_t phash,
 		const DescType *origDesc,
 		DescType *newDesc)
 {
@@ -1956,7 +1957,7 @@ static const DescType* process_texture_override(uint32_t hash,
 	const DescType* ret = origDesc;
 	unsigned i;
 
-	find_texture_overrides(hash, origDesc, &matches, NULL);
+	find_texture_overrides(hash, phash, origDesc, &matches, NULL);
 
 	if (origDesc && !matches.empty()) {
 		// There is at least one matching texture override, which means
@@ -1976,8 +1977,13 @@ static const DescType* process_texture_override(uint32_t hash,
 			if (LogFile) {
 				char buf[256];
 				StrResourceDesc(buf, 256, origDesc);
-				LogInfo("  %S matched resource with hash=%08x %s\n",
+				if (phash) {
+					LogInfo("  %S matched resource with hash=%08x phash=%016llx %s\n",
+						textureOverride->ini_section.c_str(), hash, phash, buf);
+				} else {
+					LogInfo("  %S matched resource with hash=%08x %s\n",
 						textureOverride->ini_section.c_str(), hash, buf);
+				}
 			}
 
 			if (!check_texture_override_iteration(textureOverride))
@@ -2014,7 +2020,7 @@ STDMETHODIMP HackerDevice::CreateBuffer(THIS_
 		hash = crc32c_hw(hash, pDesc, sizeof(D3D11_BUFFER_DESC));
 
 	// Override custom settings?
-	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
+	pNewDesc = process_texture_override(hash, 0, pDesc, &newDesc);
 
 	LockResourceCreationMode();
 	HRESULT hr = mOrigDevice1->CreateBuffer(pNewDesc, pInitialData, ppBuffer);
@@ -2069,7 +2075,7 @@ STDMETHODIMP HackerDevice::CreateTexture1D(THIS_
 	LogDebug("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
 
 	// Override custom settings?
-	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
+	pNewDesc = process_texture_override(hash, 0, pDesc, &newDesc);
 
 	LockResourceCreationMode();
 	HRESULT hr = mOrigDevice1->CreateTexture1D(pNewDesc, pInitialData, ppTexture1D);
@@ -2175,13 +2181,15 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 	// to be tracking Release operations as well, and removing them from the map.
 
 	uint32_t data_hash, hash;
+	uint64_t perceptual_hash;
 	hash = data_hash = CalcTexture2DDataHash(pDesc, pInitialData);
+	perceptual_hash = CalcTexture2DPerceptualHash(pDesc, pInitialData);
 	if (pDesc)
 		hash = CalcTexture2DDescHash(hash, pDesc);
 	LogDebug("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
 
 	// Override custom settings?
-	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
+	pNewDesc = process_texture_override(hash, perceptual_hash, pDesc, &newDesc);
 
 	// Actual creation:
 	LockResourceCreationMode();
@@ -2200,6 +2208,8 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 			handle_info->hash = hash;
 			handle_info->orig_hash = hash;
 			handle_info->data_hash = data_hash;
+			handle_info->perceptual_hash = perceptual_hash;
+			handle_info->perceptual_hash_valid = !!perceptual_hash;
 			if (pDesc)
 				memcpy(&handle_info->desc2D, pDesc, sizeof(D3D11_TEXTURE2D_DESC));
 		LeaveCriticalSection(&G->mResourcesLock);
@@ -2253,7 +2263,7 @@ STDMETHODIMP HackerDevice::CreateTexture3D(THIS_
 	LogInfo("  InitialData = %p, hash = %08lx\n", pInitialData, hash);
 
 	// Override custom settings?
-	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
+	pNewDesc = process_texture_override(hash, 0, pDesc, &newDesc);
 
 	LockResourceCreationMode();
 	HRESULT hr = mOrigDevice1->CreateTexture3D(pNewDesc, pInitialData, ppTexture3D);

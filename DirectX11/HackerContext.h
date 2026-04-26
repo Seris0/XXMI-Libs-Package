@@ -74,11 +74,13 @@ struct MappedResourceInfo {
 	bool mapped_writable;
 	void *orig_pData;
 	size_t size;
+	UINT bind_flags;
 
 	MappedResourceInfo() :
 		orig_pData(NULL),
 		size(0),
-		mapped_writable(false)
+		mapped_writable(false),
+		bind_flags(0)
 	{}
 };
 
@@ -117,6 +119,17 @@ private:
 	// These are per-context, moved from globals.h:
 	uint32_t mCurrentVertexBuffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
 	uint32_t mCurrentIndexBuffer; // Only valid while hunting=1
+	struct VertexBufferBinding {
+		ID3D11Buffer* buffer;
+		UINT offset;
+		UINT stride;
+	} mCurrentVertexBuffersBindings[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
+	struct IndexBufferBinding {
+		ID3D11Buffer* buffer;
+		UINT offset;
+		DXGI_FORMAT format;
+		bool is_explicit;
+	} mCurrentIndexBufferBinding;
 	std::vector<ID3D11Resource *> mCurrentRenderTargets;
 	ID3D11Resource *mCurrentDepthTarget;
 	UINT mCurrentPSUAVStartSlot;
@@ -145,6 +158,7 @@ private:
 	bool MapDenyCPURead(ID3D11Resource *pResource, UINT Subresource,
 			D3D11_MAP MapType, UINT MapFlags,
 			D3D11_MAPPED_SUBRESOURCE *pMappedResource);
+	bool MapTrackRegionHashes(ID3D11Resource* pResource, D3D11_MAP MapType, D3D11_RESOURCE_DIMENSION* dim);
 	void TrackAndDivertMap(HRESULT map_hr, ID3D11Resource *pResource,
 		UINT Subresource, D3D11_MAP MapType, UINT MapFlags,
 		D3D11_MAPPED_SUBRESOURCE *pMappedResource);

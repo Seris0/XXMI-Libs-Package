@@ -20,3 +20,12 @@ public:
 void TimeoutHuntingBuffers();
 void ParseHuntingSection();
 void DumpUsage(wchar_t *dir);
+
+void RegisterVisitedIndexBufferNoLock(uint32_t hash);
+void RegisterVisitedIndexBuffer(uint32_t hash);
+void RegisterVisitedVertexBufferNoLock(uint32_t hash, uint32_t slot_id);
+void RegisterVisitedVertexBuffer(uint32_t hash, uint32_t slot_id);
+void PurgeStaleVisitedBufferHashes(HackerDevice* device);
+void PassiveDecompileDrawShaders(HackerDevice *device,
+		ID3D11VertexShader *vertex_shader, UINT64 vertex_shader_hash,
+		ID3D11PixelShader *pixel_shader, UINT64 pixel_shader_hash);

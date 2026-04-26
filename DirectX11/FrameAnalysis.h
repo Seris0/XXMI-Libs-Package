@@ -98,6 +98,10 @@ private:
 	void FrameAnalysisLogMiscArray(UINT start, UINT len, void *const *array);
 	void FrameAnalysisLogAsyncQuery(ID3D11Asynchronous *async);
 	void FrameAnalysisLogData(void *buf, UINT size);
+	void FrameAnalysisLogResourceHashInline(ID3D11Resource* resource);
+	void FrameAnalysisLogConstantBuffer(int slot, char* slot_name, ID3D11Resource* resource, UINT first_constant, UINT num_constants);
+	void FrameAnalysisLogConstantBufferArray(UINT start, UINT len, ID3D11Resource* const* ppResources, const UINT* pFirstConstant, const UINT* pNumConstants);
+
 	FILE *frame_analysis_log;
 	unsigned draw_call;
 	unsigned non_draw_call_dump_counter;
@@ -171,7 +175,7 @@ private:
 	void finish_deferred_resources(ID3D11CommandList *command_list);
 
 	HRESULT FrameAnalysisFilename(wchar_t *filename, size_t size, bool compute,
-			wchar_t *reg, char shader_type, int idx, ID3D11Resource *handle);
+			wchar_t *reg, char shader_type, int idx, ID3D11Resource *handle, uint32_t override_hash = 0);
 	HRESULT FrameAnalysisFilenameResource(wchar_t *filename, size_t size, const wchar_t *type,
 			ID3D11Resource *handle, bool force_filename_handle);
 	const wchar_t* dedupe_tex2d_filename(ID3D11Texture2D *resource,

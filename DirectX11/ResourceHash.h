@@ -12,6 +12,302 @@
 #include "util.h"
 #include "DrawCallInfo.h"
 
+// A cache-friendly hash table implementation using:
+// - Contiguous storage(std::vector)
+// - Open addressing(linear probing)
+// - No per-element heap allocations
+//
+// Design goals :
+// - Minimize cache misses
+// - Avoid pointer chasing
+// - Provide predictable performance for real-time systems
+// - Keep implementation simple and deterministic
+//
+// Characteristics :
+// - Average O(1) lookup and insert
+// - High performance at moderate load factors(<= ~0.5 recommended)
+// - Rehashing is O(n) but infrequent if capacity is preallocated
+// - No support for deletion(can be extended with tombstones if needed)
+//
+// Thread safety :
+// - Not thread-safe.
+template<typename K, typename V, typename Hasher = std::hash<K>>
+class FlatHashMap
+{
+public:
+	// Entry represents a single slot in the hash table.
+	// 'occupied' indicates whether the slot contains a valid key-value pair.
+	// Empty slots are treated as termination points during probing.
+	struct Entry {
+		K key;
+		V value;
+		uint32_t generation = 0;
+	};
+
+	static size_t NextPow2(size_t v)
+	{
+		if (v <= 1) return 1;
+		v--;
+		v |= v >> 1;
+		v |= v >> 2;
+		v |= v >> 4;
+		v |= v >> 8;
+		v |= v >> 16;
+		if constexpr (sizeof(size_t) == 8)
+			v |= v >> 32;
+		v++;
+		return v;
+	}
+
+	// Constructs the hash map with an initial capacity.
+	// - Capacity should ideally be a power of two for optimal performance
+	// - Larger initial capacity reduces need for rehashing
+	FlatHashMap(size_t capacity = 1024)
+	{
+		capacity = NextPow2(capacity);
+		table.resize(capacity);
+		mask = capacity - 1;
+		count = 0;
+		current_generation = 1; // 0 reserved as "empty"
+	}
+
+	// Inserts or updates a key-value pair.
+	// Behavior:
+	// - If the key already exists, its value is updated
+	// - Otherwise, a new entry is inserted
+	// Performance:
+	// - Amortized O(1)
+	// - May trigger rehash if load factor exceeds threshold
+	inline void insert(const K& key, const V& value)
+	{
+		// Maintain load factor <= 0.5
+		if ((count * 2) >= table.size()) {
+			rehash(table.size() * 2);
+		}
+
+		size_t idx = hasher(key) & mask;
+
+		while (true)
+		{
+			Entry& e = table[idx];
+
+			// Empty slot (generation mismatch)
+			if (e.generation != current_generation) {
+				e.key = key;
+				e.value = value;
+				e.generation = current_generation;
+				++count;
+				return;
+			}
+
+			// Update existing
+			if (e.key == key) {
+				e.value = value;
+				return;
+			}
+
+			idx = (idx + 1) & mask;
+		}
+	}
+
+	// Finds a value by key.
+	// Returns:
+	// - true if found (value written to 'out')
+	// - false if not found
+	// Performance:
+	// - Average O(1)
+	// - Depends on load factor and clustering
+	inline bool find(const K& key, V& out) const
+	{
+		size_t idx = hasher(key) & mask;
+
+		// Probe sequence
+		while (true)
+		{
+			const Entry& e = table[idx];
+
+			// Empty slot to key not present
+			if (e.generation != current_generation)
+				return false;
+
+			if (e.key == key)
+			{
+				out = e.value;
+				return true;
+			}
+
+			idx = (idx + 1) & mask;
+		}
+	}
+
+	// Finds value by key (no copy, faster)
+	inline V* find_ptr(const K& key)
+	{
+		size_t idx = hasher(key) & mask;
+
+		while (true)
+		{
+			Entry& e = table[idx];
+
+			if (e.generation != current_generation)
+				return nullptr;
+
+			if (e.key == key)
+				return &e.value;
+
+			idx = (idx + 1) & mask;
+		}
+	}
+
+	// Clears the hash map.
+	// Behavior:
+	// - Instead of touching memory, we just bump generation
+	// - Does NOT shrink capacity
+	// - Keeps allocated memory for reuse
+	// Performance:
+	// - O(1) clear
+	inline void clear()
+	{
+		++current_generation;
+		count = 0;
+
+		// Handle rare wraparound (very unlikely: 2^32 clears)
+		if (current_generation == 0)
+		{
+			// Full reset fallback
+			for (auto& e : table)
+				e.generation = 0;
+
+			current_generation = 1;
+		}
+	}
+
+	// Returns the number of active entries.
+	size_t size() const
+	{
+		return count;
+	}
+
+	// Returns the total capacity of the table.
+	size_t capacity() const
+	{
+		return table.size();
+	}
+
+private:
+	std::vector<Entry> table; // Contiguous storage for cache efficiency
+	size_t count = 0;         // Number of active entries
+	size_t mask = 0;
+	uint32_t current_generation = 1;
+	Hasher hasher;
+
+	// Rehashes the table into a larger capacity.
+	// Complexity:
+	// - O(n)
+	// - Should happen infrequently if capacity is sized appropriately
+	void rehash(size_t new_capacity)
+	{
+		// Allocate new table
+		std::vector<Entry> old = std::move(table);
+
+		new_capacity = NextPow2(new_capacity);
+
+		table.clear();
+		table.resize(new_capacity);
+
+		mask = new_capacity - 1;
+		count = 0;
+
+		// Reset generation space
+		uint32_t old_generation = current_generation;
+		current_generation = 1;
+
+		// Reinsert all valid entries
+		for (auto& e : old)
+		{
+			if (e.generation == old_generation)
+			{
+				insert(e.key, e.value);
+			}
+		}
+	}
+};
+
+struct RegionHashKeyL2
+{
+	uint32_t offset;
+	uint32_t size;
+
+	bool operator==(const RegionHashKeyL2& other) const
+	{
+		return offset == other.offset && size == other.size;
+	}
+};
+
+struct RegionHashKeyHasherL2
+{
+	size_t operator()(const RegionHashKeyL2& k) const
+	{
+		return (static_cast<uint64_t>(k.offset) << 32) | k.size;
+	}
+};
+
+struct RegionHashKeyL3
+{
+	uint64_t ptr;
+	uint32_t offset;
+	uint32_t size;
+
+	bool operator==(const RegionHashKeyL3& other) const
+	{
+		return ptr == other.ptr && offset == other.offset && size == other.size;
+	}
+};
+
+struct RegionHashKeyHasherL3
+{
+	size_t operator()(const RegionHashKeyL3& k) const
+	{
+		uint64_t h = k.ptr;            // Use 64-bit pointer as base
+		h ^= (uint64_t)k.offset << 32; // XOR offset with upper bits
+		h ^= (uint64_t)k.size;         // XOR size with lower bits
+		h ^= h >> 32;                  // XOR ptr+size entropy with lower bits
+		return h;
+	}
+};
+
+struct RegionHashesCache
+{
+	struct RegionCacheEntry {
+		uint32_t hash;
+		uint32_t version;
+	};
+public:
+	// Data cache invalidation step size in bytes.
+	// So, for page size of 256 and buffer size of 16MB we'll get 16MB/256=65536 page count.
+	// Page size of 256 looks like a good balance between invalidation precision and memory usage.
+	static constexpr UINT PAGE_SIZE = 256;
+	// How many region hashes we expect to use per page.
+	// Controls initial L2 cache size.
+	// So, for 2 hashes per page, page size of 256 and 65536 pages we'll get 65536/(256/2)=512 size.
+	// If we're interested in region hashes only as entry points, 512 unique IB/VB0 per 16MB should be a good start.
+	static constexpr UINT HASHES_PER_PAGE = 2;
+
+	void Initialize(size_t buffer_size);
+	void Add(const RegionHashKeyL2& key, uint32_t hash);
+	uint32_t Get(const RegionHashKeyL2& key);
+	size_t GetSize();
+	void Invalidate(UINT start, UINT end);
+	void Clear();
+
+private:
+	// Cache of per-region hashes for given buffer.
+	// Key = region offset, Value = CRC32 hash of that region.
+	// Avoids recomputing hashes for the same draw-call regions.
+	std::unique_ptr <FlatHashMap<RegionHashKeyL2, RegionCacheEntry, RegionHashKeyHasherL2>> cache;
+	std::vector<UINT> page_versions;
+};
+
 // Tracks info about specific resource instances:
 struct ResourceHandleInfo
 {
@@ -19,6 +315,17 @@ struct ResourceHandleInfo
 	uint32_t hash;
 	uint32_t orig_hash;	// Original hash at the time of creation
 	uint32_t data_hash;	// Just the data hash for track_texture_updates
+	uint64_t perceptual_hash;
+	bool perceptual_hash_valid;
+
+	// CPU-side copy of the resource data captured via hooks or staging buffer.
+	// Used to compute hashes for arbitrary regions without re-mapping
+	// the GPU resource multiple times.
+	uint8_t* cached_data;
+	size_t cached_data_size = 0;
+	//uint32_t cached_data_hash = 0;
+
+	std::unique_ptr<RegionHashesCache> region_hashes_cache;
 
 	// TODO: If we are sure we understand all possible differences between
 	// the original desc and that obtained by querying the resource we
@@ -37,8 +344,30 @@ struct ResourceHandleInfo
 		type(D3D11_RESOURCE_DIMENSION_UNKNOWN),
 		hash(0),
 		orig_hash(0),
-		data_hash(0)
+		data_hash(0),
+		perceptual_hash(0),
+		perceptual_hash_valid(false),
+		cached_data(nullptr)
 	{}
+
+	~ResourceHandleInfo()
+	{
+		if (cached_data) {
+			free(cached_data);
+			cached_data = nullptr;
+		}
+	}
+
+	void InitializeDataCache(size_t size);
+	void WriteDataCache(const void* src, size_t size);
+	void WriteDataCacheRegion(const void* src, size_t size, UINT offset);
+	// Clears cached region hashes and invalidates cached buffer data.
+	// Should be called when the underlying resource contents change.
+	void ClearDataCache();
+
+	void CacheRegionHash(const RegionHashKeyL2& key, uint32_t hash);
+	uint32_t GetCachedRegionHash(const RegionHashKeyL2& key);
+	void InvalidatePerceptualHash();
 };
 
 struct CopySubresourceRegionContamination
@@ -188,10 +517,20 @@ uint32_t CalcTexture1DDataHash(const D3D11_TEXTURE1D_DESC *pDesc, const D3D11_SU
 uint32_t CalcTexture2DDataHash(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData, bool zero_padding = false);
 uint32_t CalcTexture2DDataHashAccurate(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
 uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
+uint64_t CalcTexture2DPerceptualHash(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
 
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
 uint32_t GetResourceHash(ID3D11Resource *resource);
+uint64_t GetResourcePerceptualHash(ID3D11Resource *resource);
+static bool CacheBufferData(ID3D11DeviceContext* context, ID3D11Buffer* buffer, ResourceHandleInfo* info);
+void ClearResourceRegionHashCache(ID3D11Resource* resource);
+void InvalidateResourcePerceptualHash(ID3D11Resource *resource);
+UINT GetVertexBufferRegionOffset(UINT stride, DrawCallInfo* call_info, UINT byte_offset);
+UINT GetIndexBufferRegionOffset(DXGI_FORMAT format, DrawCallInfo* call_info, UINT byte_offset);
+UINT GetIndexBufferRegionSize(DXGI_FORMAT format, DrawCallInfo* call_info);
+UINT GetVertexBufferRegionSize(UINT stride, DrawCallInfo* call_info);
+uint32_t GetRegionHash(ID3D11DeviceContext* context, ID3D11Buffer* buffer, UINT offset, UINT size);
 
 void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 		ID3D11Resource *src, UINT srcSubresource, char type,
@@ -199,8 +538,11 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 
 void UpdateResourceHashFromCPU(ID3D11Resource *resource,
 	const void *data, UINT rowPitch, UINT depthPitch);
+void UpdateResourcePerceptualHashFromCPU(ID3D11Resource *resource,
+	const void *data, UINT rowPitch, UINT depthPitch);
 
 void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src);
+void PropagateResourcePerceptualHash(ID3D11Resource *dst, ID3D11Resource *src);
 
 bool MapTrackResourceHashUpdate(ID3D11Resource *pResource, UINT Subresource);
 
@@ -419,6 +761,24 @@ typedef std::set<std::shared_ptr<FuzzyMatchResourceDesc>, FuzzyMatchResourceDesc
 
 typedef std::vector<TextureOverride*> TextureOverrideMatches;
 
+struct TextureOverrideFuzzyMatch {
+	uint32_t hash;
+	TextureOverride* texture_override;
+};
+typedef std::vector<TextureOverrideFuzzyMatch> TextureOverrideFuzzyMatches;
+
+TextureOverrideFuzzyMatches* get_fuzzy_matches_by_draw_info(DrawCallInfo* call_info);
+
 template <typename DescType>
-void find_texture_overrides(uint32_t hash, const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+void find_texture_overrides(uint32_t hash, uint64_t phash, const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+void find_texture_overrides_for_resource_by_hash(ID3D11Resource* resource, TextureOverrideMatches* matches, DrawCallInfo* call_info);
+void find_texture_overrides_for_resource_by_phash(ID3D11Resource* resource, TextureOverrideMatches* matches, DrawCallInfo* call_info);
+void find_texture_overrides_for_resource_desc(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info);
 void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches* matches, DrawCallInfo* call_info);
+void find_texture_override_for_phash(uint64_t phash, TextureOverrideMatches* matches, DrawCallInfo* call_info);
+
+void find_texture_overrides_by_hash_from_fuzzy_matches(uint32_t hash, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info);
+void find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(ID3D11Resource* resource, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info);
+
+void ClearRegionHashesGlobalCache();

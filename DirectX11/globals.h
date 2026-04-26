@@ -257,6 +257,7 @@ struct ShaderOverride {
 	char model[20]; // More than long enough for even ps_4_0_level_9_0
 	int allow_duplicate_hashes;
 	float filter_index, backup_filter_index;
+	std::vector<float> filter_indices, backup_filter_indices;
 
 	CommandList command_list;
 	CommandList post_command_list;
@@ -268,6 +269,46 @@ struct ShaderOverride {
 		backup_filter_index(FLT_MAX)
 	{
 		model[0] = '\0';
+	}
+
+	void clear_filter_indices()
+	{
+		filter_index = FLT_MAX;
+		filter_indices.clear();
+	}
+
+	void add_filter_index(float index)
+	{
+		if (index == FLT_MAX)
+			return;
+
+		for (float existing : filter_indices) {
+			if (existing == index)
+				return;
+		}
+
+		filter_indices.push_back(index);
+		if (filter_index == FLT_MAX)
+			filter_index = index;
+	}
+
+	void set_filter_indices(const std::vector<float> &indices)
+	{
+		clear_filter_indices();
+		for (float index : indices)
+			add_filter_index(index);
+	}
+
+	bool has_filter_index(float index) const
+	{
+		if (filter_index != FLT_MAX && filter_index == index)
+			return true;
+
+		for (float existing : filter_indices) {
+			if (existing == index)
+				return true;
+		}
+		return false;
 	}
 };
 typedef std::unordered_map<UINT64, struct ShaderOverride> ShaderOverrideMap;
@@ -327,6 +368,7 @@ typedef std::unordered_map<ID3D11Resource *, ResourceHandleInfo> ResourceMap;
 // will sort it in the ini parser when we create the list.
 typedef std::vector<struct TextureOverride> TextureOverrideList;
 typedef std::unordered_map<uint32_t, TextureOverrideList> TextureOverrideMap;
+typedef std::unordered_map<UINT64, TextureOverrideList> TextureOverridePHashMap;
 
 // We use this when collecting resource info for ShaderUsage.txt to take a
 // snapshot of the resource handle, hash and original hash. We used to just
@@ -337,9 +379,10 @@ struct ResourceSnapshot
 	ID3D11Resource *handle;
 	uint32_t hash;
 	uint32_t orig_hash;
+	uint64_t perceptual_hash;
 
-	ResourceSnapshot(ID3D11Resource *handle, uint32_t hash, uint32_t orig_hash):
-		handle(handle), hash(hash), orig_hash(orig_hash)
+	ResourceSnapshot(ID3D11Resource *handle, uint32_t hash, uint32_t orig_hash, uint64_t perceptual_hash):
+		handle(handle), hash(hash), orig_hash(orig_hash), perceptual_hash(perceptual_hash)
 	{}
 };
 static inline bool operator<(const ResourceSnapshot &lhs, const ResourceSnapshot &rhs)
@@ -348,6 +391,8 @@ static inline bool operator<(const ResourceSnapshot &lhs, const ResourceSnapshot
 		return (lhs.orig_hash < rhs.orig_hash);
 	if (lhs.hash != rhs.hash)
 		return (lhs.hash < rhs.hash);
+	if (lhs.perceptual_hash != rhs.perceptual_hash)
+		return (lhs.perceptual_hash < rhs.perceptual_hash);
 	return (lhs.handle < rhs.handle);
 }
 
@@ -389,6 +434,10 @@ enum class AsyncQueryType
 	QUERY,
 	PREDICATE,
 	COUNTER,
+};
+
+struct ShaderModelCacheEntry {
+	std::string shaderModel;
 };
 
 struct Globals
@@ -440,12 +489,15 @@ struct Globals
 	MarkingAction marking_actions;
 
 	UINT hunting;
+	int overlay_buffer_hash_lifetime;
 	bool fix_enabled;
 	bool config_reloadable;
 	bool show_original_enabled;
 	time_t huntTime;
 	bool verbose_overlay;
 	bool suppress_overlay;
+	bool decompile_auto_vs;
+	bool decompile_auto_ps;
 
 	bool deferred_contexts_enabled;
 
@@ -457,6 +509,9 @@ struct Globals
 	std::unordered_set<void*> frame_analysis_seen_rts;
 
 	ShaderHashType shader_hash_type;
+	bool track_region_hashes;
+	bool track_implicit_index_buffers;
+	bool allow_buffer_resize;
 	int texture_hash_version;
 	int EXPORT_HLSL;		// 0=off, 1=HLSL only, 2=HLSL+OriginalASM, 3= HLSL+OriginalASM+recompiledASM
 	bool EXPORT_SHADERS, EXPORT_FIXED, EXPORT_BINARY, CACHE_SHADERS, SCISSOR_DISABLE;
@@ -503,16 +558,26 @@ struct Globals
 
 	CRITICAL_SECTION mCriticalSection;
 
-	std::set<uint32_t> mVisitedIndexBuffers;				// std::set is sorted for consistent order while hunting
+	std::set<uint32_t> gVisitedVertexBufferSlotIds;
+	INT gSelectedVertexBufferSlotId;
+	bool gResetSelectedVertexBufferSlotId;
+	DrawCallInfo gSelectedIndexBufferDrawInfo;
+	DrawCallInfo gSelectedVertexBufferDrawInfo;
+
+	float mVisitedBuffersLastPurgeTime;
+	std::unordered_map<uint32_t, unsigned> mVisitedIndexBuffersLastSeenFrame;
+	std::unordered_map<uint32_t, unsigned> mVisitedVertexBuffersLastSeenFrame;
+
+	std::set<uint32_t> mVisitedIndexBuffers;		        // std::set is sorted for consistent order while hunting
 	uint32_t mSelectedIndexBuffer;
 	int mSelectedIndexBufferPos;
 	std::set<UINT64> mSelectedIndexBuffer_VertexShader;		// std::set so that shaders used with an index buffer will be sorted in log when marked
 	std::set<UINT64> mSelectedIndexBuffer_PixelShader;		// std::set so that shaders used with an index buffer will be sorted in log when marked
 
-	std::set<uint32_t> mVisitedVertexBuffers;				// std::set is sorted for consistent order while hunting
+	std::set<uint32_t> mVisitedVertexBuffers;		        // std::set is sorted for consistent order while hunting
 	uint32_t mSelectedVertexBuffer;
 	int mSelectedVertexBufferPos;
-	std::set<UINT64> mSelectedVertexBuffer_VertexShader;		// std::set so that shaders used with an index buffer will be sorted in log when marked
+	std::set<UINT64> mSelectedVertexBuffer_VertexShader;	// std::set so that shaders used with an index buffer will be sorted in log when marked
 	std::set<UINT64> mSelectedVertexBuffer_PixelShader;		// std::set so that shaders used with an index buffer will be sorted in log when marked
 
 	std::set<UINT64> mVisitedVertexShaders;					// Only shaders seen since last hunting timeout; std::set for consistent order while hunting
@@ -520,12 +585,14 @@ struct Globals
 	int mSelectedVertexShaderPos;							// -1 for unselected state.
 	std::set<uint32_t> mSelectedVertexShader_IndexBuffer;	// std::set so that index buffers used with a shader will be sorted in log when marked
 	std::set<uint32_t> mSelectedVertexShader_VertexBuffer;	// std::set so that index buffers used with a shader will be sorted in log when marked
+	std::unordered_set<UINT64> mAutoDecompiledVertexShaders;
 
 	std::set<UINT64> mVisitedPixelShaders;					// std::set is sorted for consistent order while hunting
 	UINT64 mSelectedPixelShader;							// Hash.  -1 now for unselected state.
 	int mSelectedPixelShaderPos;							// -1 for unselected state.
 	std::set<uint32_t> mSelectedPixelShader_IndexBuffer;	// std::set so that index buffers used with a shader will be sorted in log when marked
 	std::set<uint32_t> mSelectedPixelShader_VertexBuffer;	// std::set so that index buffers used with a shader will be sorted in log when marked
+	std::unordered_set<UINT64> mAutoDecompiledPixelShaders;
 	ID3D11PixelShader* mPinkingShader;						// Special pixels shader to mark a selection with hot pink.
 
 	ShaderMap mShaders;										// All shaders ever registered with CreateXXXShader
@@ -550,7 +617,13 @@ struct Globals
 
 	ShaderOverrideMap mShaderOverrideMap;
 	TextureOverrideMap mTextureOverrideMap;
+	TextureOverridePHashMap mTextureOverridePHashMap;
 	FuzzyTextureOverrides mFuzzyTextureOverrides;
+
+	std::unordered_map<UINT64, ShaderModelCacheEntry> mShaderModelCache;
+
+	unordered_map<uint32_t, TextureOverrideFuzzyMatches> mTextureOverrideDrawIndexMap;  // Contains hash+TextureOverrides pairs indexed by match_index_count
+	unordered_map<uint32_t, TextureOverrideFuzzyMatches> mTextureOverrideDrawVertexMap; // Contains hash+TextureOverrides pairs indexed by match_vertex_count
 
 	// Statistics
 	///////////////////////////////////////////////////////////////////////
@@ -628,12 +701,17 @@ struct Globals
 		mPinkingShader(0),
 
 		hunting(HUNTING_MODE_DISABLED),
+		overlay_buffer_hash_lifetime(-1),
 		fix_enabled(true),
 		config_reloadable(false),
 		show_original_enabled(false),
 		huntTime(0),
 		verbose_overlay(false),
 		suppress_overlay(false),
+		decompile_auto_vs(false),
+		decompile_auto_ps(false),
+		gSelectedVertexBufferSlotId(-1),
+		gResetSelectedVertexBufferSlotId(false),
 
 		deferred_contexts_enabled(true),
 
@@ -644,6 +722,9 @@ struct Globals
 		cur_analyse_options(FrameAnalysisOptions::INVALID),
 
 		shader_hash_type(ShaderHashType::FNV),
+		track_region_hashes(false),
+		track_implicit_index_buffers(false),
+		allow_buffer_resize(true),
 		texture_hash_version(0),
 		EXPORT_SHADERS(false),
 		EXPORT_HLSL(0),
@@ -801,4 +882,9 @@ static inline ResourceMap::iterator lookup_resource_handle_info(ID3D11Resource *
 static inline TextureOverrideMap::iterator lookup_textureoverride(uint32_t hash)
 {
 	return Profiling::lookup_map(G->mTextureOverrideMap, hash, &Profiling::textureoverride_lookup_overhead);
+}
+
+static inline TextureOverridePHashMap::iterator lookup_textureoverride_phash(UINT64 hash)
+{
+	return Profiling::lookup_map(G->mTextureOverridePHashMap, hash, &Profiling::textureoverride_lookup_overhead);
 }

@@ -1,0 +1,93 @@
+[33md9f80b37[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mEndfield-AICrazy[m[33m, [m[1;32mEndfield-AICrazy2[m[33m)[m AI
+[33m53083321[m WTH AI DID
+[33maab77325[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmaster[m[33m)[m Merge remote-tracking branch 'upstream/master'
+[33mb11bbb9a[m Added per-buffer first_constant and num_constants logging to log.txt for SetConstantBuffers1
+[33m50728a8c[m Target dump ib/vb for debug
+[33m36cc041b[m[33m ([m[1;31mupstream/master[m[33m)[m Added per-buffer first_constant and num_constants logging to log.txt for SetConstantBuffers1
+[33m38b1ce23[m Personal Changes
+[33mb6dc850f[m[33m ([m[1;33mtag: [m[1;33mv0.7.9[m[33m)[m Fix crash for typo in ShaderRegEx block by bo3b
+[33m0c28d55b[m[33m ([m[1;33mtag: [m[1;33mv0.7.6[m[33m)[m Changed 3dmloader.dll compiler to clang
+[33m9e18eb9d[m[33m ([m[1;33mtag: [m[1;33mv0.7.5[m[33m)[m Merge pull request #6 from failsafe42/master
+[33m7c3c5b66[m Added error handling for rare edge cases
+[33m3724f061[m Added a WriteProcessMemory injection function to InjectorLib
+[33m706391d0[m[33m ([m[1;33mtag: [m[1;33mv0.7.4[m[33m)[m Removed "partner" from ShaderOverride ini section options
+[33mae283469[m Added IDXGISwapChain2 upcast
+[33me3b66a44[m[33m ([m[1;33mtag: [m[1;33mv0.7.1[m[33m)[m Allow fuzzy TextureOverride matches to be processed when exact matches exist
+[33m62b4effc[m[33m ([m[1;33mtag: [m[1;33mv0.7.0[m[33m)[m Removed manual crash handler
+[33m751a2b9e[m[33m ([m[1;33mtag: [m[1;33mv0.6.8[m[33m)[m Added dll_initialization_delay option to System section of d3dx.ini
+[33mfb7989bc[m[33m ([m[1;33mtag: [m[1;33mv0.6.7[m[33m)[m Added StartProcess method to 3dmloader.dll
+[33md17e9350[m Readme update
+[33me8d4052d[m[33m ([m[1;33mtag: [m[1;33mv0.6.6[m[33m)[m Fixed CopyResource failing for resized buffer as destination
+[33mfef2bc2e[m[33m ([m[1;33mtag: [m[1;33mv0.6.5[m[33m)[m Added UAV resizing support
+[33md1b1025d[m[33m ([m[1;33mtag: [m[1;33mv0.6.4[m[33m)[m Fixed effective_dpi being able to return 0 when detection failed
+[33meb11e266[m Updated d3dx.ini template with screen_width and screen_height
+[33m33ac243c[m[33m ([m[1;33mtag: [m[1;33mv0.6.3[m[33m)[m Added fallback resolution screen_width and screen_height options to System section of d3dx.ini
+[33m49672fb4[m[33m ([m[1;33mtag: [m[1;33mv0.6.2[m[33m)[m Added built-in fallbacks for window_width, window_height, cursor_x, cursor_y to make them more reliable
+[33m577a1b51[m Readme update.
+[33md76d5b42[m[33m ([m[1;33mtag: [m[1;33mv0.6.1[m[33m)[m Added Win10 SDK based d3dcompiler_47.dll as Win11 SDK one on GitHub fails for some users
+[33m6cc3ead1[m[33m ([m[1;33mtag: [m[1;33mv0.6.0[m[33m)[m Added autobuild support for Zip Release via GitHub Actions
+[33me17123d7[m Limited setlocale scope to local only
+[33m4c0c2f18[m Removed unused legacy files
+[33m7c66a258[m[33m ([m[1;33mtag: [m[1;33mv0.5.5[m[33m)[m Removed unneeded nvapi dll redirect
+[33m0c42d7f0[m Added back `sli`, `stereo_active` and `stereo_available` to API (always return false) for legacy reasons
+[33mc371f97f[m[33m ([m[1;33mtag: [m[1;33mv0.5.4[m[33m)[m Fixed `skip` marking mode for pixel shaders
+[33m0b353422[m[33m ([m[1;33mtag: [m[1;33mv0.5.3[m[33m)[m Removed buffer downsize support for override_vertex_count
+[33md7bec2f1[m[33m ([m[1;33mtag: [m[1;33mv0.5.2[m[33m)[m Reintroduced ini-handler locks
+[33m1eed1e05[m[33m ([m[1;33mtag: [m[1;33mv0.5.1[m[33m)[m Reintroduced resource creation mode locks
+[33mcf035aee[m[33m ([m[1;33mtag: [m[1;33mv0.5.0[m[33m)[m Merge branch 'master' of https://github.com/SpectrumQT/3Dmigoto
+[33m1921b4fa[m Stripped away stereo support code, we're 2dmigoto now
+[33m35c2d5b0[m Rearranged section name lists for faster ini parsing
+[33md957b1b3[m[33m ([m[1;33mtag: [m[1;33mv0.4.3[m[33m)[m Tweaked VertexLimitRaise to set the buffer size to 8800000 (up from 8 MB) bytes like old GIMI DLL, reworked custom raise to use the largest requested size on conflict
+[33mf46dbbf1[m[33m ([m[1;33mtag: [m[1;33mv0.4.2[m[33m)[m Added D3D11On12CreateDevice to exports
+[33m6aa2f652[m[33m ([m[1;33mtag: [m[1;33mv0.4.1[m[33m)[m Fixed float parsing error for OS with non-dot decimal symbols configured
+[33m6f36793d[m[33m ([m[1;33mtag: [m[1;33mv0.4.0[m[33m)[m Fixed hunting mode not working at all
+[33m7ac43122[m Turned disabled hunting mode to soft disabled one but without hotkeys registration
+[33ma34f1548[m[33m ([m[1;33mtag: [m[1;33mv0.3.1[m[33m)[m 3dmloader.dll: Free d3d11.dll on UnhookLibrary call
+[33mda737525[m[33m ([m[1;33mtag: [m[1;33mv0.3.0[m[33m)[m Added experimental HDR support aka SwapChain3 upcast
+[33maa0bd287[m Added skip_early_includes_load option
+[33me07e1e18[m Added UTF-8 namespaces support for d3dx_user.ini
+[33mdf9242d2[m Added UTF-8 namespaces support to tokenizer
+[33mf3416f72[m Switched ParseIniStream ini reading to UTF-8 wstring
+[33m1e0f19e0[m Fixed overlay messages containing non-ASCII chars not being displayed
+[33mdd83d7b6[m FrameAnalysis UTF-8 filenames support for log.txt
+[33ma1c54e64[m Set global locale to en_US.UTF-8
+[33m3b9a1bf5[m Fix overlay notifications display with non-ascii characters
+[33m4b891fd8[m[33m ([m[1;33mtag: [m[1;33mv0.2.3[m[33m)[m Disabled persistent vars autosave notification
+[33m46b9540c[m Time caching, config reload delay refactor, settings autosave refactor
+[33m2a51cc49[m Merge pull request #2 from NurarihyonMaou/master
+[33mccca01ab[m Auto Save Persistent Variables every 5min
+[33me8ad1dcb[m Reload 20s after Launch
+[33mf046bed9[m[33m ([m[1;33mtag: [m[1;33mv0.2.2[m[33m)[m Turned debug notifications with extended context into 2-liners
+[33mbeb7f481[m[33m ([m[1;33mtag: [m[1;33mv0.2.1[m[33m)[m IniParser GetIniString and matches_globbing_vector optimizations, added reload time counter
+[33m805020cb[m[33m ([m[1;33mtag: [m[1;33mv0.2.0[m[33m)[m Extended debug context for debug overlay output
+[33maaf77f44[m Made debug overlay to respect show_warnings setting
+[33m0a029a74[m[33m ([m[1;33mtag: [m[1;33mv0.1.0[m[33m)[m Allow d3dx.dll to load from any location by specified loader exe
+[33mf48f4a58[m DLL version of 3dmigoto loader.exe
+[33me7d70cc7[m Allows d3dx.dll to load from nested directories
+[33m468cf065[m Ini option to disable warnings
+[33m5ea981c9[m Changed VertexLimitRaise syntax, added GetConstantIniVariable
+[33mac350031[m Changed VertexLimitRaise syntax
+[33mf41d655a[m Added Store support (stock GIMI implementation)
+[33mc1c27fe9[m Added VertexLimitRaise support
+[33m826aca29[m Upgarde to VS2022, removed legacy solutions
+[33mea9f8ce2[m Add draw=auto
+[33m3eabc5f8[m HLSLDecompiler: Fix use of overwritten index variable
+[33m458af5c0[m HLSL Decompiler: Fix choosing wrong bool variable in constant buffer
+[33m901e2f58[m TestShaders: Add DOAXVV skinning shader
+[33m43826e93[m TestShaders: Update chk files
+[33m5cf4446c[m TestShaders: Force unix newlines for .chk and .sh files
+[33md926d490[m TestShaders: Fix test harness exiting early under WSL
+[33mda360291[m Add check_target_even_without_loader setting
+[33mcf28a062[m Disable functionality when [Loader]Target doesn't match exe name
+[33m54af9048[m Add effective_dpi for UI scaling
+[33m339cc6bc[m Exclude desktop.ini files by default
+[33m95c5f05c[m Merge branch 'draw_indexed_instanced_auto'
+[33mbcd72b7b[m Correct the error if info for draw call missing
+[33ma094efc4[m Implement "drawindexedinstanced = auto"
+[33m6d1881cd[m Implement "drawindexedinstanced = auto"
+[33m24aba5ca[m Fix logging ini condition failed when it in fact succeeded
+[33m8e0a7810[m Fix crash in DOA6 in Optimus laptops by enabling hooking quirk protection around present
+[33m88633bce[m lock debugger: Blacklist apphelp.dll to make lock debugger work in SkyrimVR
+[33m521f884b[m Frame Analysis: Fix cut short "Dumping Buffer *.txt ->" message
+[33m12389f08[m Move DirectX11 project to top of sln file
+[33mfbe2bdeb[m D

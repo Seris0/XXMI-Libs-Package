@@ -1480,7 +1480,7 @@ static void FillInMissingInfo(ResourceCopyTargetType type, ID3D11Resource *resou
 	// with the resource, or was stored in a custom resource). If they are
 	// not we will try to fill them in here from either the resource or
 	// view description as they may be necessary later to create a
-	// compatible view or perform a region copy:
+	// compatible view:
 
 	resource->GetType(&dimension);
 	if (dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
@@ -2448,34 +2448,32 @@ float CommandListOperand::process_texture_filter(CommandListState *state)
 	return 1.0;
 }
 
-float CommandListOperand::process_shader_filter(CommandListState *state)
+ID3D11DeviceChild *CommandListOperand::get_shader_filter_handle(CommandListState *state)
 {
 	HackerContext *mHackerContext = state->mHackerContext;
-	ID3D11DeviceChild *shader = NULL;
 
 	switch (shader_filter_target) {
 		case L'v':
-			shader = mHackerContext->mCurrentVertexShaderHandle;
-			break;
+			return mHackerContext->mCurrentVertexShaderHandle;
 		case L'h':
-			shader = mHackerContext->mCurrentHullShaderHandle;
-			break;
+			return mHackerContext->mCurrentHullShaderHandle;
 		case L'd':
-			shader = mHackerContext->mCurrentDomainShaderHandle;
-			break;
+			return mHackerContext->mCurrentDomainShaderHandle;
 		case L'g':
-			shader = mHackerContext->mCurrentGeometryShaderHandle;
-			break;
+			return mHackerContext->mCurrentGeometryShaderHandle;
 		case L'p':
-			shader = mHackerContext->mCurrentPixelShaderHandle;
-			break;
+			return mHackerContext->mCurrentPixelShaderHandle;
 		case L'c':
-			shader = mHackerContext->mCurrentComputeShaderHandle;
-			break;
+			return mHackerContext->mCurrentComputeShaderHandle;
 		default:
 			LogOverlay(LOG_DIRE, "BUG: Unknown shader filter type: \"%C\"\n", shader_filter_target);
-			break;
+			return NULL;
 	}
+}
+
+float CommandListOperand::process_shader_filter(CommandListState *state)
+{
+	ID3D11DeviceChild *shader = get_shader_filter_handle(state);
 
 	// Negative zero means no shader bound:
 	if (!shader)
@@ -2496,6 +2494,25 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 	// Matched ShaderOverride / ShaderRegex, but no filter_index:
 	return 1.0;
+}
+
+bool CommandListOperand::shader_filter_matches(CommandListState *state, float filter_index)
+{
+	ID3D11DeviceChild *shader = get_shader_filter_handle(state);
+
+	if (!shader)
+		return false;
+
+	ShaderMap::iterator shader_it = lookup_shader_hash(shader);
+
+	if (shader_it == G->mShaders.end())
+		return false;
+
+	ShaderOverrideMap::iterator override = lookup_shaderoverride(shader_it->second);
+	if (override == G->mShaderOverrideMap.end())
+		return false;
+
+	return override->second.has_filter_index(filter_index);
 }
 
 void CommandList::clear()
@@ -3334,14 +3351,104 @@ DEFINE_OPERATOR(less_equal_operator,    "<=", (lhs <= rhs));
 DEFINE_OPERATOR(greater_operator,       ">",  (lhs > rhs));
 DEFINE_OPERATOR(greater_equal_operator, ">=", (lhs >= rhs));
 
+// Shader filters can carry multiple explicit filter indices. Equality keeps
+// the legacy numeric result, but also checks the extra indices for membership.
+static bool shader_filter_equality_compare(
+		shared_ptr<CommandListEvaluatable> lhs,
+		shared_ptr<CommandListEvaluatable> rhs,
+		CommandListState *state, HackerDevice *device, bool *ret)
+{
+	shared_ptr<CommandListOperand> shader_operand;
+	shared_ptr<CommandListOperand> rhs_operand;
+	float shader_value, rhs_value;
+
+	if (!state)
+		return false;
+
+	shader_operand = dynamic_pointer_cast<CommandListOperand>(lhs);
+	if (!shader_operand || shader_operand->type != ParamOverrideType::SHADER)
+		return false;
+
+	rhs_operand = dynamic_pointer_cast<CommandListOperand>(rhs);
+	if (rhs_operand && rhs_operand->type == ParamOverrideType::SHADER)
+		return false;
+
+	shader_value = shader_operand->evaluate(state, device);
+	rhs_value = rhs->evaluate(state, device);
+
+	if (shader_value == rhs_value) {
+		*ret = true;
+		return true;
+	}
+
+	// Preserve the legacy 0.0 / -0.0 meanings for unbound or unmatched shaders.
+	if (rhs_value == 0.0f) {
+		*ret = false;
+		return true;
+	}
+
+	*ret = shader_operand->shader_filter_matches(state, rhs_value);
+	return true;
+}
+
+static bool shader_filter_equality_compare_either_side(
+		shared_ptr<CommandListEvaluatable> lhs,
+		shared_ptr<CommandListEvaluatable> rhs,
+		CommandListState *state, HackerDevice *device, bool *ret)
+{
+	if (shader_filter_equality_compare(lhs, rhs, state, device, ret))
+		return true;
+	return shader_filter_equality_compare(rhs, lhs, state, device, ret);
+}
+
+class equality_operatorT : public CommandListOperator {
+public:
+	equality_operatorT(
+			std::shared_ptr<CommandListToken> lhs,
+			CommandListOperatorToken &t,
+			std::shared_ptr<CommandListToken> rhs
+		) : CommandListOperator(lhs, t, rhs)
+	{}
+	static const wchar_t* pattern() { return L"=="; }
+	float evaluate(float lhs, float rhs) override { return (lhs == rhs); }
+	float evaluate(CommandListState *state, HackerDevice *device=NULL) override {
+		bool ret;
+
+		if (shader_filter_equality_compare_either_side(lhs, rhs, state, device, &ret))
+			return ret;
+
+		return evaluate(lhs->evaluate(state, device), rhs->evaluate(state, device));
+	}
+};
+static CommandListOperatorFactory<equality_operatorT> equality_operator;
+
+class inequality_operatorT : public CommandListOperator {
+public:
+	inequality_operatorT(
+			std::shared_ptr<CommandListToken> lhs,
+			CommandListOperatorToken &t,
+			std::shared_ptr<CommandListToken> rhs
+		) : CommandListOperator(lhs, t, rhs)
+	{}
+	static const wchar_t* pattern() { return L"!="; }
+	float evaluate(float lhs, float rhs) override { return (lhs != rhs); }
+	float evaluate(CommandListState *state, HackerDevice *device=NULL) override {
+		bool ret;
+
+		if (shader_filter_equality_compare_either_side(lhs, rhs, state, device, &ret))
+			return !ret;
+
+		return evaluate(lhs->evaluate(state, device), rhs->evaluate(state, device));
+	}
+};
+static CommandListOperatorFactory<inequality_operatorT> inequality_operator;
+
 // The triple equals operator tests for binary equivalence - in particular,
 // this allows us to test for negative zero, used in texture filtering to
 // signify that nothing is bound to a given slot. Negative zero cannot be
 // tested for using the regular equals operator, since -0.0 == +0.0. This
 // operator could also test for specific cases of NAN (though, without the
 // vs2015 toolchain "nan" won't parse as such).
-DEFINE_OPERATOR(equality_operator,      "==", (lhs == rhs));
-DEFINE_OPERATOR(inequality_operator,    "!=", (lhs != rhs));
 DEFINE_OPERATOR(identical_operator,     "===",(*(uint32_t*)&lhs == *(uint32_t*)&rhs));
 DEFINE_OPERATOR(not_identical_operator, "!==",(*(uint32_t*)&lhs != *(uint32_t*)&rhs));
 
@@ -5133,6 +5240,8 @@ bool ParseCommandListResourceCopyDirective(const wchar_t *section,
 	wchar_t buf[MAX_PATH];
 	wchar_t *src_ptr = NULL;
 	D3D11_RESOURCE_MISC_FLAG misc_flags = (D3D11_RESOURCE_MISC_FLAG)0;
+	wstring src_token;
+	size_t first, last;
 
 	if (!operation->dst.ParseTarget(key, false, ini_namespace))
 		goto bail;
@@ -5151,9 +5260,15 @@ bool ParseCommandListResourceCopyDirective(const wchar_t *section,
 	if (!src_ptr)
 		goto bail;
 
-	if (!operation->src.ParseTarget(src_ptr, true, ini_namespace))
+	src_token = src_ptr;
+	first = src_token.find_first_not_of(L" \t");
+	if (first == wstring::npos)
 		goto bail;
+	last = src_token.find_last_not_of(L" \t");
+	src_token = src_token.substr(first, last - first + 1);
 
+	if (!operation->src.ParseTarget(src_token.c_str(), true, ini_namespace))
+		goto bail;
 	if (!(operation->options & ResourceCopyOptions::COPY_TYPE_MASK)) {
 		// If the copy method was not speficied make a guess.
 		// References aren't always safe (e.g. a resource can't be both
@@ -5859,7 +5974,7 @@ void ResourceCopyTarget::SetResource(
 	case ResourceCopyTargetType::VERTEX_BUFFER:
 		buf = (ID3D11Buffer*)res;
 		mOrigContext1->IASetVertexBuffers(slot, 1, &buf, &stride, &offset);
-		return;
+		break;
 
 	case ResourceCopyTargetType::INDEX_BUFFER:
 		buf = (ID3D11Buffer*)res;
@@ -6061,12 +6176,11 @@ D3D11_BIND_FLAG ResourceCopyTarget::BindFlags(CommandListState *state, D3D11_RES
 
 void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *resource_found, TextureOverrideMatches *matches)
 {
-	TextureOverrideMap::iterator i;
-	ID3D11Resource *resource = NULL;
 	ID3D11View *view = NULL;
-	uint32_t hash = 0;
+	UINT stride = 0, offset = 0;
+	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 
-	resource = GetResource(state, &view, NULL, NULL, NULL, NULL);
+	ID3D11Resource* resource = GetResource(state, &view, &stride, &offset, &format, NULL);
 
 	if (resource_found)
 		*resource_found = !!resource;
@@ -6074,7 +6188,80 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 	if (!resource)
 		return;
 
-	find_texture_overrides_for_resource(resource, matches, state->call_info);
+	// For vertex and index buffers the game may pack multiple meshes into
+	// one buffer and bind them at different offsets. In that case the base
+	// resource hash alone is not enough – we must use the same region data hash 
+	// that IASetVertexBuffers / IASetIndexBuffer computed and stored in 
+	// mCurrentVertexBuffers[] /mCurrentIndexBuffer, and that the hunting overlay displays.
+	// That way the hash the user copies from the overlay matches the one looked up
+	// here, and ini `CheckTextureOverride` triggers [TextureOverride] sections correctly.
+	if (G->track_region_hashes)
+	{
+		// Region hashing is only applicable to vertex/index buffers where offsets define subregions of a shared resource.
+		UINT region_offset = 0, region_size = 0;
+		switch (this->type) {
+			case ResourceCopyTargetType::VERTEX_BUFFER:
+				region_offset = GetVertexBufferRegionOffset(stride, state->call_info, offset);
+				region_size = GetVertexBufferRegionSize(stride, state->call_info);
+				break;
+
+			case ResourceCopyTargetType::INDEX_BUFFER:
+				region_offset = GetIndexBufferRegionOffset(format, state->call_info, offset);
+				region_size = GetIndexBufferRegionSize(format, state->call_info);
+				break;
+		}
+
+		// Originally, 3dmigoto has 2 methods of TextureOverride matching:
+		// 1. Hash Matching - prefilter by hash, filter by call_info: stored in G->mTextureOverrideMap (hash -> vector<TextureOverride>).
+		// 2. Fuzzy Matching - prefilter by match options, filter by call_info: stored in G->mFuzzyTextureOverrides (set<FuzzyMatchResourceDesc, FuzzyMatchResourceDescLess>).
+		// Those methods cannot be used for SAME TextureOverride - if hash is defined, fuzzy match options will be ignored by INI parser.
+		if (!region_size) 
+		{
+			// Resource isn't index or vertex buffer, or region size cannot be computed.
+			// Fallback to original behavior. 
+			// Run Hash Matching and Fuzzy Matching.
+			find_texture_overrides_for_resource(resource, matches, state->call_info);
+		} 
+		else 
+		{
+			// For region hashes we need another method - prefilter by call_info, filter by hash.
+			// This path has higher CPU cost than Hash Matching, but it's still WAY cheaper than to region-hash every IB or VB.
+
+			// Prefilter TextureOverride sections from G->mTextureOverrideMap by call_info.
+			TextureOverrideFuzzyMatches* draw_info_matches = get_fuzzy_matches_by_draw_info(state->call_info);
+
+			uint32_t region_hash = 0;
+
+			// Filter prefiltering results by hash.
+			if (draw_info_matches) {
+				Profiling::State profiling_state;
+				if (Profiling::mode == Profiling::Mode::SUMMARY)
+					Profiling::start(&profiling_state);
+
+				// Calculate region hash.
+				region_hash = GetRegionHash(state->mOrigContext1, (ID3D11Buffer*)resource, region_offset, region_size);
+
+				if (Profiling::mode == Profiling::Mode::SUMMARY)
+					Profiling::end(&profiling_state, &Profiling::region_tracking_overhead);
+
+				// Run Hash Matching.
+				if (region_hash) {
+					// By region hash.
+					find_texture_overrides_by_hash_from_fuzzy_matches(region_hash, draw_info_matches, matches, state->call_info);
+				} else {
+					// By full resource hash.
+					find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(resource, draw_info_matches, matches, state->call_info);
+				}
+			}
+
+			// Run Fuzzy Matching.
+			find_texture_overrides_for_resource_desc(resource, matches, state->call_info);
+		}
+	}
+	else
+	{
+		find_texture_overrides_for_resource(resource, matches, state->call_info);
+	}
 
 	//COMMAND_LIST_LOG(state, "  found texture hash = %08llx\n", hash);
 
@@ -6128,13 +6315,9 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 		CommandListState *state,
 		UINT stride,
 		UINT offset,
-		DXGI_FORMAT format,
-		UINT *buf_dst_size)
+		DXGI_FORMAT format)
 {
 	D3D11_BUFFER_DESC new_desc;
-	ID3D11Buffer *buffer = NULL;
-	UINT dst_size;
-
 	src_resource->GetDesc(&new_desc);
 	new_desc.BindFlags = bind_flags;
 	// We reuse the misc flags from the source, which has worked fairly
@@ -6155,55 +6338,15 @@ static ID3D11Buffer *RecreateCompatibleBuffer(
 	}
 
 	if (bind_flags & D3D11_BIND_CONSTANT_BUFFER) {
-		// Constant buffers have additional limitations. The size must
-		// be a multiple of 16, so round up if necessary, and it cannot
-		// be larger than 4096 x 4 component x 4 byte constants.
-		dst_size = (new_desc.ByteWidth + 15) & ~0xf;
-		dst_size = min(dst_size, D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
-
 		// Constant buffers cannot be structured, so clear that flag:
 		new_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 		// XXX: Should we clear StructureByteStride? Seems to work ok
 		// without clearing that.
-
-		// If the size of the new resource doesn't match the old or
-		// there is an offset we will have to perform a region copy
-		// instead of a regular copy:
-		if (offset || dst_size != new_desc.ByteWidth) {
-			// It might be temping to take the offset into account
-			// here and make the buffer only as large as it need to
-			// be, but it's possible that the source offset might
-			// change much more often than the source buffer (just
-			// a guess), which could potentially lead us to
-			// constantly recreating the destination buffer.
-
-			// Note down the size of the source and destination:
-			*buf_dst_size = dst_size;
-			new_desc.ByteWidth = dst_size;
-		}
 	} else if (IsCoersionToStructuredBufferRequired(src_view, stride, offset, format, bind_flags)) {
 		new_desc.MiscFlags |= D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 		new_desc.StructureByteStride = stride;
 
-		// A structured buffer needs to be a multiple of it's stride,
-		// which may not be the case if we're converting a buffer to
-		// one. Round it down:
-		dst_size = new_desc.ByteWidth / stride * stride;
-		// For now always using the region copy if there's an offset.
-		// We might not need to do that if the offset is aligned to the
-		// stride (although we would need to recreate the view every
-		// time it changed), but for now it seems safest to use the
-		// region copy method whenever there is an offset:
-		if (offset || dst_size != new_desc.ByteWidth) {
-			*buf_dst_size = dst_size;
-			new_desc.ByteWidth = dst_size;
-		}
-	} else if (!src_view && offset) {
-		// No source view but we do have an offset - use the region
-		// copy to knock out the offset. We can probably assume the
-		// original resource met all the size and alignment
-		// constraints, so we shouldn't need to resize it.
-		*buf_dst_size = new_desc.ByteWidth;
+		// A structured buffer needs to be a multiple of its stride.
 	}
 
 	if (dst && dst->type == ResourceCopyTargetType::CUSTOM_RESOURCE)
@@ -6479,14 +6622,12 @@ static void RecreateCompatibleResource(
 		ResourceCopyOptions options,
 		UINT stride,
 		UINT offset,
-		DXGI_FORMAT format,
-		UINT *buf_dst_size)
+		DXGI_FORMAT format)
 {
 	D3D11_RESOURCE_DIMENSION src_dimension;
 	D3D11_BIND_FLAG bind_flags = (D3D11_BIND_FLAG)0;
 	D3D11_RESOURCE_MISC_FLAG misc_flags = (D3D11_RESOURCE_MISC_FLAG)0;
 	ID3D11Resource *res = NULL;
-	bool restore_create_mode = false;
 
 	if (dst)
 		bind_flags = dst->BindFlags(state, &misc_flags);
@@ -6497,7 +6638,7 @@ static void RecreateCompatibleResource(
 	switch (src_dimension) {
 		case D3D11_RESOURCE_DIMENSION_BUFFER:
 			res = RecreateCompatibleBuffer(ini_line, dst, (ID3D11Buffer*)src_resource, (ID3D11Buffer*)*dst_resource,
-				resource_pool, src_view, bind_flags, misc_flags, state, stride, offset, format, buf_dst_size);
+				resource_pool, src_view, bind_flags, misc_flags, state, stride, offset, format);
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
 			res = RecreateCompatibleTexture<ID3D11Texture1D, D3D11_TEXTURE1D_DESC, &ID3D11Device::CreateTexture1D>
@@ -6548,11 +6689,6 @@ static void FillOutBufferDescCommon(DescType *desc, UINT stride,
 	// description in the documentation. Research suggests DX11
 	// only uses multiples of the element size (since it's a union,
 	// it shouldn't matter which name we use).
-	//
-	// XXX: At the moment we are relying on the region copy to have
-	// knocked out the offset for us. We could alternatively do it
-	// here (and the below should work), but we would need to
-	// create a new view every time the offset changes.
 	//
 	// Possible TODO: Handle vertex/index buffers with "first vertex/index"
 	// here? These can now be accessed via command list expression and
@@ -7130,39 +7266,6 @@ static void ResolveMSAA(ID3D11Resource *dst_resource, ID3D11Resource *src_resour
 	}
 }
 
-static void SpecialCopyBufferRegion(ID3D11Resource *dst_resource,ID3D11Resource *src_resource,
-		CommandListState *state, UINT stride, UINT *offset,
-		UINT buf_src_size, UINT buf_dst_size)
-{
-	// We are copying a buffer for use in a constant buffer and the size of
-	// the original buffer did not meet the constraints of a constant
-	// buffer.
-	D3D11_BOX src_box;
-
-	// We want to copy from the offset to the end of the source buffer, but
-	// cap it to the destination size to avoid "undefined behaviour". Keep
-	// in mind that this is "right", not "size":
-	src_box.left = *offset;
-	src_box.right = min(buf_src_size, *offset + buf_dst_size);
-
-	if (stride) {
-		// If we are copying to a structured resource, the source box
-		// must be a multiple of the stride, so round it down:
-		src_box.right = (src_box.right - src_box.left) / stride * stride + src_box.left;
-	}
-
-	src_box.top = 0;
-	src_box.bottom = 1;
-	src_box.front = 0;
-	src_box.back = 1;
-
-	state->mOrigContext1->CopySubresourceRegion(dst_resource, 0, 0, 0, 0, src_resource, 0, &src_box);
-
-	// We have effectively removed the offset during the region copy, so
-	// set it to 0 to make sure nothing will try to use it again elsewhere:
-	*offset = 0;
-}
-
 static UINT get_resource_bind_flags(ID3D11Resource *resource)
 {
 	D3D11_RESOURCE_DIMENSION dimension;
@@ -7398,7 +7501,7 @@ void ResourceCopyOperation::run(CommandListState *state)
 	UINT stride = 0;
 	UINT offset = 0;
 	DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-	UINT buf_src_size = 0, buf_dst_size = 0;
+	UINT buf_src_size = 0;
 
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
@@ -7453,7 +7556,7 @@ void ResourceCopyOperation::run(CommandListState *state)
 		RecreateCompatibleResource(&ini_line, &dst, src_resource,
 			pp_cached_resource, p_resource_pool, src_view, pp_cached_view,
 			state,
-			options, stride, offset, format, &buf_dst_size);
+			options, stride, offset, format);
 
 		if (!*pp_cached_resource) {
 			COMMAND_LIST_LOG(state, "  error creating/updating destination resource\n");
@@ -7471,12 +7574,6 @@ void ResourceCopyOperation::run(CommandListState *state)
 			COMMAND_LIST_LOG(state, "  resolving MSAA\n");
 			Profiling::msaa_resolutions++;
 			ResolveMSAA(dst_resource, src_resource, state);
-		} else if (buf_dst_size) {
-			COMMAND_LIST_LOG(state, "  performing region copy\n");
-			Profiling::buffer_region_copies++;
-			SpecialCopyBufferRegion(dst_resource, src_resource,
-					state, stride, &offset,
-					buf_src_size, buf_dst_size);
 		} else {
 			COMMAND_LIST_LOG(state, "  performing full copy\n");
 			Profiling::resource_full_copies++;
@@ -7512,7 +7609,7 @@ void ResourceCopyOperation::run(CommandListState *state)
 		*pp_cached_view = dst_view;
 	}
 
-	dst.SetResource(state, dst_resource, dst_view, stride, offset, format, buf_dst_size);
+	dst.SetResource(state, dst_resource, dst_view, stride, offset, format, 0);
 
 	if (options & ResourceCopyOptions::SET_VIEWPORT)
 		SetViewportFromResource(state, dst_resource);

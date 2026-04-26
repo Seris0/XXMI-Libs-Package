@@ -1014,6 +1014,68 @@ float GetIniFloat(const wchar_t *section, const wchar_t *key, float def, bool *f
 	return ret;
 }
 
+static void add_unique_float(vector<float> *values, float value)
+{
+	for (float existing : *values) {
+		if (existing == value)
+			return;
+	}
+
+	values->push_back(value);
+}
+
+static bool parse_ini_float_token(const wchar_t *section, const wchar_t *key, const wstring &token, float *ret)
+{
+	int len;
+
+	if (swscanf_s(token.c_str(), L"%f%n", ret, &len) != 1 || len != token.length()) {
+		wstring ini_namespace = ini_sections[section].ini_namespace;
+		if (ini_namespace.empty())
+			ini_namespace = L"d3dx.ini";
+		IniWarningW(L"Floating point parse error: %ls=%ls\n - [%ls] @ [%ls]\n", key, token.c_str(), section, ini_namespace.c_str());
+		return false;
+	}
+
+	LogInfo("  %S=%f\n", key, *ret);
+	return true;
+}
+
+static vector<float> GetIniFloatList(const wchar_t *section, const wchar_t *key, bool *found)
+{
+	vector<wstring> lines;
+	vector<float> ret;
+	wstring token;
+	size_t first, last;
+	float value;
+
+	if (found)
+		*found = false;
+
+	lines = GetIniStringMultipleKeys(section, key);
+	for (wstring &line : lines) {
+		first = 0;
+		while (true) {
+			first = line.find_first_not_of(L" \t,", first);
+			if (first == wstring::npos)
+				break;
+
+			last = line.find_first_of(L" \t,", first);
+			token = line.substr(first, last - first);
+			if (parse_ini_float_token(section, key, token, &value)) {
+				add_unique_float(&ret, value);
+				if (found)
+					*found = true;
+			}
+
+			if (last == wstring::npos)
+				break;
+			first = last + 1;
+		}
+	}
+
+	return ret;
+}
+
 int GetIniInt(const wchar_t *section, const wchar_t *key, int def, bool *found, bool warn)
 {
 	wchar_t val[32];
@@ -2281,9 +2343,10 @@ static void ParseShaderOverrideSections()
 		override->depth_filter = GetIniEnumClass(id, L"depth_filter", DepthBufferFilter::NONE, NULL, DepthBufferFilterNames);
 
 		// Superior partner shader filtering that also supports a bound/unbound case
-		override->filter_index = GetIniFloat(id, L"filter_index", FLT_MAX, NULL);
+		override->set_filter_indices(GetIniFloatList(id, L"filter_index", NULL));
 		// Backup version not affected by ShaderRegex:
 		override->backup_filter_index = override->filter_index;
+		override->backup_filter_indices = override->filter_indices;
 
 		if (GetIniStringAndLog(id, L"model", 0, setting, MAX_PATH)) {
 			wcstombs(override->model, setting, ARRAYSIZE(override->model));
@@ -2381,7 +2444,11 @@ static bool parse_shader_regex_section_main(const std::wstring *section_id, Shad
 
 	regex_group->ini_section = *section_id;
 
-	regex_group->filter_index = GetIniFloat(section_id->c_str(), L"filter_index", FLT_MAX, NULL);
+	regex_group->filter_indices = GetIniFloatList(section_id->c_str(), L"filter_index", NULL);
+	if (regex_group->filter_indices.empty())
+		regex_group->filter_index = FLT_MAX;
+	else
+		regex_group->filter_index = regex_group->filter_indices.front();
 
 	ParseCommandList(section_id->c_str(), &regex_group->command_list, &regex_group->post_command_list, ShaderRegexIniKeys);
 	return true;
@@ -2644,6 +2711,7 @@ static void ParseShaderRegexSections()
 // function. Used by ParseCommandList to find any unrecognised lines.
 wchar_t *TextureOverrideIniKeys[] = {
 	L"hash",
+	L"phash",
 	L"format",
 	L"width",
 	L"height",
@@ -2857,33 +2925,36 @@ static void parse_texture_override_common(const wchar_t *id, TextureOverride *ov
 	override->width_multiply = GetIniFloat(id, L"width_multiply", 1.0f, NULL);
 	override->height_multiply = GetIniFloat(id, L"height_multiply", 1.0f, NULL);
 
-	// Handle buffer resize aka vertex limit raise feature.
-	int override_vertex_count = (int)GetConstantIniVariable(id, L"override_vertex_count", -1.0f, &found);
-	if (override_vertex_count > 0) {
-		// Ensure that stride is specified.
-		int override_byte_stride = GetIniInt(id, L"override_byte_stride", -1, NULL);
-		if (override_byte_stride <= 0) {
-			LogOverlayW(LOG_DIRE, L"Failed to detect stride for override_vertex_count=%d, please set override_byte_stride!\n - [%ls]\n", override_vertex_count, override->ini_section.c_str());
-			return;
-		}
-		// Override buffer size according to section params.
-		override->override_byte_width = override_byte_stride * override_vertex_count;
-		
-		// Handle UAV resize
-		int uav_byte_stride = (int)GetConstantIniVariable(id, L"uav_byte_stride", -1.0f, &found);
-		if (uav_byte_stride > 0) {
-			// Use StructureByteStride override (useful when actual buffer stride is different from the one declared by a game)
-			override->override_num_elements = override_vertex_count * override_byte_stride / uav_byte_stride;
+	if (G->allow_buffer_resize) 
+	{
+		// Handle buffer resize aka vertex limit raise feature.
+		int override_vertex_count = (int)GetConstantIniVariable(id, L"override_vertex_count", -1.0f, &found);
+		if (override_vertex_count > 0) {
+			// Ensure that stride is specified.
+			int override_byte_stride = GetIniInt(id, L"override_byte_stride", -1, NULL);
+			if (override_byte_stride <= 0) {
+				LogOverlayW(LOG_DIRE, L"Failed to detect stride for override_vertex_count=%d, please set override_byte_stride!\n - [%ls]\n", override_vertex_count, override->ini_section.c_str());
+				return;
+			}
+			// Override buffer size according to section params.
+			override->override_byte_width = override_byte_stride * override_vertex_count;
+
+			// Handle UAV resize
+			int uav_byte_stride = (int)GetConstantIniVariable(id, L"uav_byte_stride", -1.0f, &found);
+			if (uav_byte_stride > 0) {
+				// Use StructureByteStride override (useful when actual buffer stride is different from the one declared by a game)
+				override->override_num_elements = override_vertex_count * override_byte_stride / uav_byte_stride;
+			} else {
+				// Use VertexCount override
+				override->override_num_elements = override_vertex_count;
+			}
+		} else if (wcsstr(override->ini_section.c_str(), L"VertexLimitRaise") != 0) {
+			// Fall back to ~8MB buffer to mimic original GIMI behaviour if `VertexLimitRaise` keyword is found in the section header.
+			override->override_byte_width = 8800000;
 		} else {
-			// Use VertexCount override
-			override->override_num_elements = override_vertex_count;
+			// Do not override original buffer size.
+			override->override_byte_width = -1;
 		}
-	} else if(wcsstr(override->ini_section.c_str(), L"VertexLimitRaise") != 0) {
-		// Fall back to ~8MB buffer to mimic original GIMI behaviour if `VertexLimitRaise` keyword is found in the section header.
-		override->override_byte_width = 8800000;
-	} else {
-		// Do not override original buffer size.
-		override->override_byte_width = -1;
 	}
 	
 	if (GetIniString(id, L"Iteration", 0, setting, MAX_PATH))
@@ -3145,6 +3216,32 @@ static void warn_if_duplicate_texture_hash(TextureOverride *override, uint32_t h
 	}
 }
 
+static void warn_if_duplicate_texture_phash(TextureOverride *override, uint64_t phash)
+{
+	TextureOverridePHashMap::iterator i;
+	TextureOverrideList::iterator j;
+
+	if (override->has_draw_context_match || override->has_match_priority)
+		return;
+
+	i = lookup_textureoverride_phash(phash);
+	if (i == G->mTextureOverridePHashMap.end())
+		return;
+
+	for (j = i->second.begin(); j != i->second.end(); j++) {
+		if (&(*j) == override)
+			continue;
+		if (j->has_draw_context_match || j->has_match_priority)
+			continue;
+
+		IniWarningW(L"Possible Mod Conflict: Duplicate TextureOverride phash=%016llx\n"
+			   "[%ls]\n"
+			   "[%ls]\n"
+			   "If this is intentional, add a match_priority=n to suppress warning and disambiguate order\n",
+			   phash, j->ini_section.c_str(), override->ini_section.c_str());
+	}
+}
+
 static void index_byte_width_override(TextureOverride* override, uint32_t hash, map<uint32_t, int>& max_byte_width_map)
 {
 	map<uint32_t, int>::iterator max_byte_width;
@@ -3190,7 +3287,9 @@ static void ParseTextureOverrideSections()
 	const wchar_t *id;
 	TextureOverride *override;
 	uint32_t hash;
+	uint64_t phash;
 	bool found;
+	bool found_phash;
 	map<uint32_t, int> max_byte_width_map;
 
 	// Lock entire routine, this can be re-inited.  These shaderoverrides
@@ -3199,6 +3298,7 @@ static void ParseTextureOverrideSections()
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
 	G->mTextureOverrideMap.clear();
+	G->mTextureOverridePHashMap.clear();
 	G->mFuzzyTextureOverrides.clear();
 
 	lower = ini_sections.lower_bound(wstring(L"TextureOverride"));
@@ -3210,21 +3310,30 @@ static void ParseTextureOverrideSections()
 		LogInfo("[%S]\n", id);
 
 		hash = (uint32_t)GetIniHash(id, L"Hash", 0, &found);
-		if (!found) {
+		phash = GetIniHash(id, L"phash", 0, &found_phash);
+		if (!found && !found_phash) {
 			if (texture_override_section_has_fuzzy_match_keys(id)) {
 				parse_texture_override_fuzzy_match(id);
 				continue;
 			}
 
-			IniWarningW(L"Section missing Hash= or valid match options\n - [%ls]\n", id);
+			IniWarningW(L"Section missing Hash=, phash= or valid match options\n - [%ls]\n", id);
 			continue;
 		}
 
-		if (texture_override_section_has_fuzzy_match_keys(id))
-			IniWarningW(L"Cannot use hash= and match options together!\n - [%ls]\n", id);
+		if (found && found_phash)
+			IniWarningW(L"Cannot use hash= and phash= together!\n - [%ls]\n", id);
 
-		G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
-		override = &G->mTextureOverrideMap[hash].back();
+		if (texture_override_section_has_fuzzy_match_keys(id))
+			IniWarningW(L"Cannot use hash=/phash= and match options together!\n - [%ls]\n", id);
+
+		if (found) {
+			G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
+			override = &G->mTextureOverrideMap[hash].back();
+		} else {
+			G->mTextureOverridePHashMap[phash].emplace_back();
+			override = &G->mTextureOverridePHashMap[phash].back();
+		}
 		override->ini_section = id;
 
 		// Important that we do *not* register the command lists yet:
@@ -3232,10 +3341,13 @@ static void ParseTextureOverrideSections()
 
 		// Warn if same hash is used two or more times in sections that
 		// do not have a draw context match or match_priority:
-		warn_if_duplicate_texture_hash(override, hash);
+		if (found)
+			warn_if_duplicate_texture_hash(override, hash);
+		else
+			warn_if_duplicate_texture_phash(override, phash);
 
 		// Record the largest `override_byte_width` value for the hash.
-		if (override->override_byte_width != -1) {
+		if (found && override->override_byte_width != -1) {
 			index_byte_width_override(override, hash, max_byte_width_map);
 		}
 	}
@@ -3265,6 +3377,13 @@ static void ParseTextureOverrideSections()
 		// to hold pointers so it can rearrange the pointers however it
 		// likes without changing the TextureOverrides they point to,
 		// similar to how the CommandList data structures work.
+		for (TextureOverride &to : tolkv.second) {
+			registered_command_lists.push_back(&to.command_list);
+			registered_command_lists.push_back(&to.post_command_list);
+		}
+	}
+	for (auto &tolkv : G->mTextureOverridePHashMap) {
+		std::sort(tolkv.second.begin(), tolkv.second.end(), TextureOverrideLess);
 		for (TextureOverride &to : tolkv.second) {
 			registered_command_lists.push_back(&to.command_list);
 			registered_command_lists.push_back(&to.post_command_list);
@@ -4098,6 +4217,32 @@ static void warn_of_conflicting_d3dx(wchar_t *dll_ini_path)
 			"Using this configuration: %S\n", dll_ini_path);
 }
 
+// Caches TextureOverrides with match_index_count and match_vertex_count along with hash for fast lookup.
+// Used in buffer region hashes tracking system.
+void BuildTextureOverrideDrawMaps()
+{
+	G->mTextureOverrideDrawIndexMap.clear();
+	G->mTextureOverrideDrawVertexMap.clear();
+
+	for (auto& pair : G->mTextureOverrideMap)
+	{
+		uint32_t hash = pair.first;
+		TextureOverrideList& list = pair.second;
+
+		for (TextureOverride& ov : list)
+		{
+			if (ov.match_index_count.op == FuzzyMatchOp::EQUAL && ov.match_index_count.rhs_type1 == FuzzyMatchOperandType::VALUE) {
+				G->mTextureOverrideDrawIndexMap[ov.match_index_count.val].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
+				continue;
+			}
+			if (ov.match_vertex_count.op == FuzzyMatchOp::EQUAL && ov.match_vertex_count.rhs_type1 == FuzzyMatchOperandType::VALUE) {
+				G->mTextureOverrideDrawVertexMap[ov.match_vertex_count.val].emplace_back(TextureOverrideFuzzyMatch{ hash, const_cast<TextureOverride*>(&ov) });
+				continue;
+			}
+		}
+	}
+}
+
 void LoadConfigFile()
 {
 	wchar_t iniFile[MAX_PATH], logFilename[MAX_PATH];
@@ -4313,6 +4458,9 @@ void LoadConfigFile()
 	G->CACHE_SHADERS = GetIniBool(L"Rendering", L"cache_shaders", false, NULL);
 	G->SCISSOR_DISABLE = GetIniBool(L"Rendering", L"rasterizer_disable_scissor", false, NULL);
 	G->track_texture_updates = GetIniBoolOrInt(L"Rendering", L"track_texture_updates", 0, NULL);
+	G->track_region_hashes = GetIniBool(L"Rendering", L"track_region_hashes", false, NULL);
+	G->track_implicit_index_buffers = GetIniBool(L"Rendering", L"track_implicit_index_buffers", false, NULL);
+	G->allow_buffer_resize = GetIniBool(L"Rendering", L"allow_buffer_resize", true, NULL);
 	G->assemble_signature_comments = GetIniBool(L"Rendering", L"assemble_signature_comments", false, NULL);
 	G->disassemble_undecipherable_custom_data = GetIniBool(L"Rendering", L"disassemble_undecipherable_custom_data", false, NULL);
 	G->patch_cb_offsets = GetIniBool(L"Rendering", L"patch_assembly_cb_offsets", false, NULL);
@@ -4466,6 +4614,10 @@ void LoadConfigFile()
 	ParseShaderOverrideSections();
 	ParseShaderRegexSections();
 	ParseTextureOverrideSections();
+
+	// Build match_index_cound and match_vertex_count based cache for TextureOverride's
+	if (G->track_region_hashes)
+		BuildTextureOverrideDrawMaps();
 
 	LogInfo("[Present]\n");
 	G->present_command_list.clear();

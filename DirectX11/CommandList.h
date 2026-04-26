@@ -619,8 +619,8 @@ enum class ResourceCopyOptions {
 	NO_VIEW_CACHE   = 0x00000200,
 	RAW_VIEW        = 0x00000400,
 
-	COPY_MASK       = 0x000000c9, // Anything that implies a copy
-	COPY_TYPE_MASK  = 0x000000cb, // Anything that implies a copy or a reference
+	COPY_MASK       = 0x00000089, // Anything that implies a copy
+	COPY_TYPE_MASK  = 0x0000008b, // Anything that implies a copy or a reference
 };
 SENSIBLE_ENUM(ResourceCopyOptions);
 static EnumName_t<wchar_t *, ResourceCopyOptions> ResourceCopyOptionNames[] = {
@@ -654,10 +654,10 @@ static EnumName_t<wchar_t *, ResourceCopyOptions> ResourceCopyOptionNames[] = {
 // if_dest_is_null - only perform the operation if the destination is not currently assigned
 // if_dest_is_compatible - only perform the operation if the destination exists, and is compatible with the source
 // if_dest_is_null_or_incompatible - only perform the operation if the destination is not currently assigned, or is incompatible
-// copy_subresource_region=... - Use copy_subresource_region instead of copy_resource
 // mip_map, array, etc. - create a view that exposes only part of the resource
 // overwrite - instead of creating a new resource for a copy operation, overwrite the resource already assigned to the destination (if it exists and is compatible)
 
+class CommandListExpression;
 
 class ResourceCopyOperation : public CommandListCommand {
 public:
@@ -837,7 +837,9 @@ enum class ParamOverrideType {
 	TEXTURE,	// Needs shader type and slot number specified in
 	SHADER,		// [ShaderOverride]. [TextureOverride] sections can
 			// specify filter_index=N to define the value passed in
-			// here. Special values for no [TextureOverride]
+			// here. ShaderOverride/ShaderRegex sections can also
+			// carry multiple shader filter indices for equality tests.
+			// Special values for no [TextureOverride]
 			// section = 0.0, or [TextureOverride] with no
 			// filter_index = 1.0
 	VERTEX_COUNT,
@@ -917,6 +919,7 @@ class CommandListOperand :
 	public CommandListOperandBase,
 	public CommandListEvaluatable {
 	float process_texture_filter(CommandListState*);
+	ID3D11DeviceChild *get_shader_filter_handle(CommandListState*);
 	float process_shader_filter(CommandListState*);
 public:
 	// TODO: Break up into separate classes for each operand type
@@ -948,6 +951,7 @@ public:
 	{}
 
 	bool parse(const wstring *operand, const wstring *ini_namespace, CommandListScope *scope);
+	bool shader_filter_matches(CommandListState *state, float filter_index);
 	float evaluate(CommandListState *state, HackerDevice *device=NULL) override;
 	bool static_evaluate(float *ret, HackerDevice *device=NULL) override;
 	bool optimise(HackerDevice *device, std::shared_ptr<CommandListEvaluatable> *replacement) override;
