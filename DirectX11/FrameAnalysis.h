@@ -127,6 +127,9 @@ private:
 
 	void DumpBufferTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE *map,
 			UINT size, char type, int idx, UINT stride, UINT offset);
+	void DumpSRVBufferTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE *map,
+			UINT size, int idx, DXGI_FORMAT format, UINT stride,
+			UINT offset, UINT first, UINT count);
 	void DumpVBTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE *map,
 			UINT size, int idx, UINT stride, UINT offset,
 			UINT first, UINT count, ID3DBlob *layout,
@@ -155,7 +158,7 @@ private:
 
 	void DumpResource(ID3D11Resource *resource, wchar_t *filename,
 			FrameAnalysisOptions buf_type_mask, int idx, DXGI_FORMAT format,
-			UINT stride, UINT offset);
+			UINT stride, UINT offset, UINT first = 0, UINT count = 0);
 	void _DumpCBs(char shader_type, bool compute,
 		ID3D11Buffer *buffers[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT]);
 	void _DumpTextures(char shader_type, bool compute,
@@ -188,6 +191,10 @@ private:
 	void dedupe_buf_filename_txt(const wchar_t *bin_filename,
 			wchar_t *txt_filename, size_t size, char type, int idx,
 			UINT stride, UINT offset);
+	void dedupe_buf_filename_srv_txt(const wchar_t *bin_filename,
+			wchar_t *txt_filename, size_t size, int idx,
+			DXGI_FORMAT format, UINT stride, UINT offset,
+			UINT first, UINT count);
 	void dedupe_buf_filename_vb_txt(const wchar_t *bin_filename,
 			wchar_t *txt_filename, size_t size, int idx,
 			UINT stride, UINT offset, UINT first, UINT count, ID3DBlob *layout,

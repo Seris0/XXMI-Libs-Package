@@ -8,14 +8,30 @@
 #define DLL_EXPORT extern "C" __declspec(dllexport)
 
 
-HMODULE *module = new HMODULE;
+static HMODULE g_module = NULL;
+
+DLL_EXPORT int Inject(DWORD pid, LPCWSTR module_path, int timeout);
+
+static bool resolve_module_path(LPCWSTR module_path, wchar_t module_full_path[MAX_PATH])
+{
+	DWORD length;
+
+	if (!module_path || !*module_path)
+		return false;
+
+	length = GetFullPathNameW(module_path, MAX_PATH, module_full_path, NULL);
+	if (!length || length >= MAX_PATH)
+		return false;
+
+	return GetFileAttributesW(module_full_path) != INVALID_FILE_ATTRIBUTES;
+}
 
 
-static bool verify_injection(PROCESSENTRY32 *pe, const wchar_t *module, bool log_name)
+static bool verify_injection(PROCESSENTRY32* pe, const wchar_t* module, bool log_name)
 {
 	HANDLE snapshot;
 	MODULEENTRY32 me;
-	const wchar_t *basename = wcsrchr(module, '\\');
+	const wchar_t* basename = wcsrchr(module, '\\');
 	bool rc = false;
 	static std::set<DWORD> pids;
 	wchar_t exe_path[MAX_PATH], mod_path[MAX_PATH];
@@ -26,7 +42,7 @@ static bool verify_injection(PROCESSENTRY32 *pe, const wchar_t *module, bool log
 		basename = module;
 
 	do {
-		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pe->th32ProcessID);
+		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pe->th32ProcessID);
 	} while (snapshot == INVALID_HANDLE_VALUE && GetLastError() == ERROR_BAD_LENGTH);
 	if (snapshot == INVALID_HANDLE_VALUE) {
 		printf("%S (%d): Verification Failed: Invalid Handle: %d\n", pe->szExeFile, pe->th32ProcessID, GetLastError());
@@ -55,16 +71,17 @@ static bool verify_injection(PROCESSENTRY32 *pe, const wchar_t *module, bool log
 				pids.insert(pe->th32ProcessID);
 			}
 			rc = true;
-		} else {
+		}
+		else {
 			wcscpy_s(mod_path, MAX_PATH, me.szExePath);
 			wcsrchr(exe_path, L'\\')[1] = '\0';
 			wcsrchr(mod_path, L'\\')[1] = '\0';
 			if (!_wcsicmp(exe_path, mod_path)) {
 				printf("\n\n\n"
-				       "WARNING: Found a second copy of 3DMigoto loaded from the game directory:\n"
-				       "%S\n"
-				       "This may crash - please remove the copy in the game directory and try again\n\n\n",
-				       me.szExePath);
+					"WARNING: Found a second copy of 3DMigoto loaded from the game directory:\n"
+					"%S\n"
+					"This may crash - please remove the copy in the game directory and try again\n\n\n",
+					me.szExePath);
 			}
 		}
 	}
@@ -81,7 +98,7 @@ static bool check_for_running_target(LPCWSTR target, LPCWSTR module)
 	HANDLE snapshot;
 	PROCESSENTRY32 pe;
 	bool rc = false;
-	const wchar_t *basename = wcsrchr(target, '\\');
+	const wchar_t* basename = wcsrchr(target, '\\');
 	static std::set<DWORD> pids;
 
 	if (basename)
@@ -117,65 +134,139 @@ out_close:
 
 
 // ----------------------------------------------------------------------------
-// Setups global Windows Hook for target library
-// Note:Make sure to remove hook with UnhookLibrary afterfards!
+// Sets up the optional global Windows hook for the target library.
+// Note: Make sure to remove the hook with UnhookLibrary afterwards.
 //
 // Error codes:
 // 100 - Another instance of 3DMigotoLoader is running
-// 200 - Failed to load provided library
-// 300 - Library is missing expected entry point
-// 400 - Failed to setup windows hook
+// 200 - Invalid module path
+//
+// If the DLL cannot be locally loaded, does not export CBTProc, or the hook
+// cannot be installed, we fall back to direct remote-thread injection later in
+// WaitForInjection, matching the EXE's behaviour more closely. In those cases
+// *hook will be NULL and this function still returns success.
 
-DLL_EXPORT int HookLibrary(LPCWSTR module_path, HHOOK *hook, HANDLE *mutex)
+DLL_EXPORT int HookLibrary(LPCWSTR module_path, HHOOK* hook, HANDLE* mutex)
 {
 	FARPROC fn;
-	//wchar_t module_full_path[MAX_PATH];
+	wchar_t module_full_path[MAX_PATH];
 
-	//printf("Hooking %S", module_path);
-
+	*hook = NULL;
 	*mutex = CreateMutexA(0, FALSE, "Local\\3DMigotoLoader");
 	if (GetLastError() == ERROR_ALREADY_EXISTS) {
+		if (*mutex) {
+			CloseHandle(*mutex);
+			*mutex = NULL;
+		}
 		return 100;
 	}
 
-	//GetModuleFileName(NULL, module_full_path, MAX_PATH);
-	//printf("WorkDir %S\n\n", module_full_path);
-
-	// For relative path:
-	//SetDllDirectory(L"SUBDIR");
-	//module = LoadLibraryExW(L"d3d11.dll", NULL, LOAD_LIBRARY_SEARCH_USER_DIRS | LOAD_LIBRARY_SEARCH_SYSTEM32);
-
-	*module = LoadLibraryExW(module_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-	if (!*module) {
-		//printf("Error loading dll: %d/n", GetLastError());
+	if (!resolve_module_path(module_path, module_full_path)) {
+		if (*mutex) {
+			CloseHandle(*mutex);
+			*mutex = NULL;
+		}
 		return 200;
 	}
 
-	//GetModuleFileName(module, module_full_path, MAX_PATH);
-	//printf("Loaded %S\n\n", module_full_path);
-
-	// Check if dll has CBTProc callback
-	fn = GetProcAddress(*module, "CBTProc");
-	if (!fn) {
-		return 300;
+	g_module = LoadLibraryExW(module_full_path, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+	if (!g_module) {
+		printf("Local load failed for %S (%lu). Falling back to direct injection.\n", module_full_path, GetLastError());
+		return EXIT_SUCCESS;
 	}
 
-	// Setup hook for loaded dll
-	*hook = SetWindowsHookEx(WH_CBT, (HOOKPROC)fn, *module, 0);
+	// Check if dll has CBTProc callback.
+	fn = GetProcAddress(g_module, "CBTProc");
+	if (!fn) {
+		FreeLibrary(g_module);
+		g_module = NULL;
+		return EXIT_SUCCESS;
+	}
+
+	// Setup hook for loaded dll.
+	*hook = SetWindowsHookEx(WH_CBT, (HOOKPROC)fn, g_module, 0);
 	if (!*hook) {
-		return 400;
+		printf("SetWindowsHookEx failed (%lu). Falling back to direct injection.\n", GetLastError());
+		FreeLibrary(g_module);
+		g_module = NULL;
 	}
 
 	return EXIT_SUCCESS;
 }
 
 
+static bool try_inject_running_target(LPCWSTR target, LPCWSTR module)
+{
+	HANDLE snapshot;
+	PROCESSENTRY32 pe;
+	bool rc = false;
+	const wchar_t* basename = wcsrchr(target, '\\');
+	static std::set<DWORD> attempted_pids;
+
+	if (basename)
+		basename++;
+	else
+		basename = target;
+
+	snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) {
+		printf("Inject Check Failed: Invalid Handle: %d\n", GetLastError());
+		return false;
+	}
+
+	pe.dwSize = sizeof(PROCESSENTRY32);
+	if (!Process32First(snapshot, &pe)) {
+		printf("Inject Check Failed: No Processes: %d\n", GetLastError());
+		goto out_close;
+	}
+
+	do {
+		int inject_rc;
+
+		if (_wcsicmp(pe.szExeFile, basename))
+			continue;
+
+		if (verify_injection(&pe, module, !attempted_pids.count(pe.th32ProcessID))) {
+			rc = true;
+			continue;
+		}
+
+		if (attempted_pids.count(pe.th32ProcessID))
+			continue;
+
+		printf("%lu: Hook path unavailable, attempting direct injection...\n", pe.th32ProcessID);
+		inject_rc = Inject(pe.th32ProcessID, module, 15);
+		attempted_pids.insert(pe.th32ProcessID);
+
+		if (inject_rc == EXIT_SUCCESS) {
+			printf("%lu: Direct injection successful.\n", pe.th32ProcessID);
+			rc = true;
+		}
+		else {
+			printf("%lu: Direct injection failed: %d\n", pe.th32ProcessID, inject_rc);
+		}
+	} while (Process32Next(snapshot, &pe));
+
+out_close:
+	CloseHandle(snapshot);
+	return rc;
+}
+
+
 // ----------------------------------------------------------------------------
-// Waits for given process to spawn (or untill timeout) and checks if module with given path was injected into it
+// Waits for the given process to spawn (or until timeout) and ensures the
+// module is injected either via hook or direct remote-thread injection.
 DLL_EXPORT int WaitForInjection(LPCWSTR module_path, LPCWSTR target_process, int timeout = 10)
 {
+	wchar_t module_full_path[MAX_PATH];
+
+	if (!resolve_module_path(module_path, module_full_path))
+		return EXIT_FAILURE;
+
 	for (int seconds = 0; seconds < +timeout; seconds++) {
-		if (check_for_running_target(target_process, module_path))
+		if (check_for_running_target(target_process, module_full_path))
+			return EXIT_SUCCESS;
+		if (try_inject_running_target(target_process, module_full_path))
 			return EXIT_SUCCESS;
 		Sleep(1000);
 	}
@@ -185,15 +276,29 @@ DLL_EXPORT int WaitForInjection(LPCWSTR module_path, LPCWSTR target_process, int
 
 // ----------------------------------------------------------------------------
 // Removes installed hook for given handle and removes the Local\\3DMigotoLoader mutex
-DLL_EXPORT int UnhookLibrary(HHOOK *hook, HANDLE* mutex)
+DLL_EXPORT int UnhookLibrary(HHOOK* hook, HANDLE* mutex)
 {
-	CloseHandle(*mutex);
-	if (UnhookWindowsHookEx(*hook)) {
-		if (FreeLibrary(*module)) {
-			return EXIT_SUCCESS;
-		}
+	bool ok = true;
+
+	if (hook && *hook) {
+		if (!UnhookWindowsHookEx(*hook))
+			ok = false;
+		*hook = NULL;
 	}
-	return EXIT_FAILURE;
+
+	if (g_module) {
+		if (!FreeLibrary(g_module))
+			ok = false;
+		g_module = NULL;
+	}
+
+	if (mutex && *mutex) {
+		if (!CloseHandle(*mutex))
+			ok = false;
+		*mutex = NULL;
+	}
+
+	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 
@@ -230,16 +335,16 @@ DLL_EXPORT int Inject(DWORD pid, LPCWSTR module_path, int timeout = 15)
 	LPVOID memory = NULL;
 	DWORD thread_exit_code = 0;
 	int exit_code = EXIT_SUCCESS;
+	wchar_t module_full_path[MAX_PATH];
+
+	if (!resolve_module_path(module_path, module_full_path))
+		return 110;
 
 	// Open process with minimal rights
 	process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
 
 	if (!process)
 		return 100;
-
-	// Validate DLL path
-	if (!module_path || GetFileAttributesW(module_path) == INVALID_FILE_ATTRIBUTES)
-		return 110;
 
 	// Resolve LoadLibraryW
 	HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -256,7 +361,7 @@ DLL_EXPORT int Inject(DWORD pid, LPCWSTR module_path, int timeout = 15)
 
 	// Length of module path in bytes
 	// Path is a wide string so the length must be multiplied by the size of a wide character
-	size_t module_path_length = (wcslen(module_path) + 1) * sizeof(wchar_t);
+	size_t module_path_length = (wcslen(module_full_path) + 1) * sizeof(wchar_t);
 
 	// Allocate memory to hold the module path
 	memory = VirtualAllocEx(process, NULL, module_path_length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -267,7 +372,7 @@ DLL_EXPORT int Inject(DWORD pid, LPCWSTR module_path, int timeout = 15)
 	}
 
 	// Write module path to allocated memory
-	if (!WriteProcessMemory(process, memory, module_path, module_path_length, NULL)) {
+	if (!WriteProcessMemory(process, memory, module_full_path, module_path_length, NULL)) {
 		VirtualFreeEx(process, memory, 0, MEM_RELEASE);
 		CloseHandle(process);
 		return 300;
@@ -302,7 +407,8 @@ DLL_EXPORT int Inject(DWORD pid, LPCWSTR module_path, int timeout = 15)
 	// Check LoadLibraryW result
 	if (!GetExitCodeThread(thread, &thread_exit_code)) {
 		exit_code = 700; // Unknown error
-	} else if (thread_exit_code == 0) {
+	}
+	else if (thread_exit_code == 0) {
 		exit_code = 600; // LoadLibrary failed
 	}
 
@@ -322,17 +428,18 @@ DLL_EXPORT BOOL APIENTRY DllMain(
 {
 	switch (fdwReason)
 	{
-		case DLL_PROCESS_ATTACH:
-			return true;
+	case DLL_PROCESS_ATTACH:
+		DisableThreadLibraryCalls(hinstDLL);
+		return true;
 
-		case DLL_PROCESS_DETACH:
-			break;
+	case DLL_PROCESS_DETACH:
+		break;
 
-		case DLL_THREAD_ATTACH:
-			break;
+	case DLL_THREAD_ATTACH:
+		break;
 
-		case DLL_THREAD_DETACH:
-			break;
+	case DLL_THREAD_DETACH:
+		break;
 	}
 	return true;
 }

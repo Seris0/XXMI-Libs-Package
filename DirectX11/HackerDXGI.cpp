@@ -201,6 +201,7 @@ void HackerSwapChain::RunFrameActions()
 	if (LogFile) fflush(LogFile);
 
 	G->gTime = (GetTickCount() - G->ticks_at_launch) / 1000.0f;
+	FinalizeMouseIndexBufferSelection(mHackerContext);
 
 	// Run the command list here, before drawing the overlay so that a
 	// custom shader on the present call won't remove the overlay. Also,

@@ -2471,26 +2471,55 @@ ID3D11DeviceChild *CommandListOperand::get_shader_filter_handle(CommandListState
 	}
 }
 
-float CommandListOperand::process_shader_filter(CommandListState *state)
+ShaderOverride *CommandListOperand::get_shader_filter_override(CommandListState *state, bool *shader_bound)
 {
 	ID3D11DeviceChild *shader = get_shader_filter_handle(state);
 
-	// Negative zero means no shader bound:
+	if (shader_bound)
+		*shader_bound = !!shader;
+
 	if (!shader)
-		return -0.0;
+		return NULL;
 
 	ShaderMap::iterator shader_it = lookup_shader_hash(shader);
 
 	if (shader_it == G->mShaders.end())
-		return 0.0;
+		return NULL;
 
-	// Positive zero means shader bound with no ShaderOverride
 	ShaderOverrideMap::iterator override = lookup_shaderoverride(shader_it->second);
 	if (override == G->mShaderOverrideMap.end())
+		return NULL;
+
+	return &override->second;
+}
+
+float CommandListOperand::process_shader_filter(CommandListState *state)
+{
+	ShaderOverride *shader_override;
+	bool shader_bound;
+	float ret;
+
+	shader_override = get_shader_filter_override(state, &shader_bound);
+
+	// Negative zero means no shader bound:
+	if (!shader_bound)
+		return -0.0;
+
+	// Positive zero means shader bound with no ShaderOverride:
+	if (!shader_override)
 		return 0.0;
 
-	if (override->second.filter_index != FLT_MAX)
-		return override->second.filter_index;
+	if (shader_filter_count)
+		return (float)shader_override->filter_index_count();
+
+	if (shader_filter_indexed) {
+		if (shader_override->get_filter_index(shader_filter_index, &ret))
+			return ret;
+		return 0.0;
+	}
+
+	if (shader_override->filter_index != FLT_MAX)
+		return shader_override->filter_index;
 
 	// Matched ShaderOverride / ShaderRegex, but no filter_index:
 	return 1.0;
@@ -2498,21 +2527,22 @@ float CommandListOperand::process_shader_filter(CommandListState *state)
 
 bool CommandListOperand::shader_filter_matches(CommandListState *state, float filter_index)
 {
-	ID3D11DeviceChild *shader = get_shader_filter_handle(state);
+	ShaderOverride *shader_override;
+	float shader_value;
 
-	if (!shader)
+	// Indexed reads and count reads are scalar values. They must never use
+	// the plain shader operand's membership matching semantics.
+	if (shader_filter_indexed || shader_filter_count) {
+		shader_value = evaluate(state);
+		return shader_value == filter_index;
+	}
+
+	shader_override = get_shader_filter_override(state, NULL);
+
+	if (!shader_override)
 		return false;
 
-	ShaderMap::iterator shader_it = lookup_shader_hash(shader);
-
-	if (shader_it == G->mShaders.end())
-		return false;
-
-	ShaderOverrideMap::iterator override = lookup_shaderoverride(shader_it->second);
-	if (override == G->mShaderOverrideMap.end())
-		return false;
-
-	return override->second.has_filter_index(filter_index);
+	return shader_override->has_filter_index(filter_index);
 }
 
 void CommandList::clear()
@@ -3144,8 +3174,11 @@ static void tokenise(const wstring *expression, CommandListSyntaxTree *tree, con
 	size_t start_pos = 0;
 	size_t end_pos = 0;
 	int ipos = 0;
+	int len1 = 0;
 	size_t friendly_pos = 0;
 	float fval;
+	wchar_t shader_filter_target;
+	unsigned shader_filter_index;
 	int ret;
 	int i;
 	bool last_was_operand = false;
@@ -3169,6 +3202,28 @@ next_token:
 				LogDebug("      Operator: \"%S\"\n", tree->tokens.back()->token.c_str());
 				last_was_operand = false;
 				goto next_token; // continue would continue wrong loop
+			}
+		}
+
+		// Indexed shader filter values, e.g. ps[0], ps[1]. These need
+		// to be tokenised together before the generic identifier parser sees ps.
+		len1 = 0;
+		ret = swscanf_s(remain.c_str(), L"%lcs[%u]%n", &shader_filter_target, 1, &shader_filter_index, &len1);
+		if (ret == 2 && len1) {
+			switch(shader_filter_target) {
+			case L'v': case L'h': case L'd': case L'g': case L'p': case L'c':
+				pos = len1;
+				token = remain.substr(0, pos);
+				operand = make_shared<CommandListOperand>(friendly_pos, token);
+				if (operand->parse(&token, ini_namespace, scope)) {
+					tree->tokens.emplace_back(std::move(operand));
+					LogDebug("      Indexed Shader Filter: \"%S\"\n", tree->tokens.back()->token.c_str());
+					if (last_was_operand)
+						throw CommandListSyntaxError(L"Unexpected identifier", friendly_pos);
+					last_was_operand = true;
+					continue;
+				}
+				throw CommandListSyntaxError(L"BUG", friendly_pos);
 			}
 		}
 
@@ -3371,6 +3426,12 @@ static bool shader_filter_equality_compare(
 
 	rhs_operand = dynamic_pointer_cast<CommandListOperand>(rhs);
 	if (rhs_operand && rhs_operand->type == ParamOverrideType::SHADER)
+		return false;
+
+	// Indexed reads and count reads are scalar values. Only the plain shader
+	// operand, e.g. ps/vs, should use membership matching. Let scalar shader
+	// operands fall back to the regular equality operator.
+	if (shader_operand->shader_filter_indexed || shader_operand->shader_filter_count)
 		return false;
 
 	shader_value = shader_operand->evaluate(state, device);
@@ -4016,6 +4077,7 @@ bool parse_command_list_var_name(const wstring &name, const wstring *ini_namespa
 bool CommandListOperand::parse(const wstring *operand, const wstring *ini_namespace, CommandListScope *scope)
 {
 	CommandListVariable *var = NULL;
+	unsigned shader_filter_index_tmp;
 	int ret, len1;
 
 	// Try parsing value as a float
@@ -4048,7 +4110,31 @@ bool CommandListOperand::parse(const wstring *operand, const wstring *ini_namesp
 		return operand_allowed_in_context(type, scope);
 	}
 
-	// Try parsing value as a shader target for partner filtering
+	// Try parsing value as a shader target for partner filtering. Indexed
+	// shader filters access all stored filter_index values: ps[0], ps[1], etc.
+	len1 = 0;
+	ret = swscanf_s(operand->c_str(), L"%lcs[%u]%n", &shader_filter_target, 1, &shader_filter_index_tmp, &len1);
+	if (ret == 2 && len1 == operand->length()) {
+		switch(shader_filter_target) {
+		case L'v': case L'h': case L'd': case L'g': case L'p': case L'c':
+			type = ParamOverrideType::SHADER;
+			shader_filter_indexed = true;
+			shader_filter_index = shader_filter_index_tmp;
+			return operand_allowed_in_context(type, scope);
+		}
+	}
+
+	len1 = 0;
+	ret = swscanf_s(operand->c_str(), L"%lcs_count%n", &shader_filter_target, 1, &len1);
+	if (ret == 1 && len1 == operand->length()) {
+		switch(shader_filter_target) {
+		case L'v': case L'h': case L'd': case L'g': case L'p': case L'c':
+			type = ParamOverrideType::SHADER;
+			shader_filter_count = true;
+			return operand_allowed_in_context(type, scope);
+		}
+	}
+
 	// WARNING: This test is especially susceptible to an uninitialised
 	//          %n fooling it into thinking it has parsed the entire string
 	//          if the stack garbage happens to contain operand->length().

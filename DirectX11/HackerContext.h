@@ -36,6 +36,13 @@ struct DrawContext
 	ID3D11VertexShader *oldVertexShader;
 	CommandList *post_commands[5];
 	DrawCallInfo call_info;
+	bool mouse_selection_probe;
+	POINT mouse_selection_cursor;
+	ID3D11Query *mouse_selection_query;
+	ID3D11RasterizerState *mouse_selection_original_rasterizer;
+	ID3D11RasterizerState *mouse_selection_probe_rasterizer;
+	UINT mouse_selection_original_scissor_count;
+	D3D11_RECT mouse_selection_original_scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
 
 	DrawContext(DrawCall type,
 			UINT VertexCount, UINT IndexCount, UINT InstanceCount,
@@ -43,10 +50,17 @@ struct DrawContext
 			ID3D11Buffer **indirect_buffer, UINT args_offset) :
 		oldVertexShader(NULL),
 		oldPixelShader(NULL),
+		mouse_selection_probe(false),
+		mouse_selection_cursor{},
+		mouse_selection_query(NULL),
+		mouse_selection_original_rasterizer(NULL),
+		mouse_selection_probe_rasterizer(NULL),
+		mouse_selection_original_scissor_count(0),
 		call_info(type, VertexCount, IndexCount, InstanceCount, FirstVertex, FirstIndex, FirstInstance,
 				indirect_buffer, args_offset)
 	{
 		memset(post_commands, 0, sizeof(post_commands));
+		memset(mouse_selection_original_scissors, 0, sizeof(mouse_selection_original_scissors));
 	}
 };
 
@@ -166,6 +180,10 @@ private:
 	void ProcessShaderOverride(ShaderOverride *shaderOverride, bool isPixelShader, DrawContext *data);
 	ID3D11PixelShader* SwitchPSShader(ID3D11PixelShader *shader);
 	ID3D11VertexShader* SwitchVSShader(ID3D11VertexShader *shader);
+	bool ShouldTrackMouseIndexBufferSelection() const;
+	bool CurrentDrawMayAffectCursor(POINT *cursor);
+	void UpdateMouseIndexBufferSelectionBeforeDraw(DrawContext &data);
+	void UpdateMouseIndexBufferSelectionAfterDraw(DrawContext &data);
 	void RecordDepthStencil(ID3D11DepthStencilView *target);
 	template <void (__stdcall ID3D11DeviceContext::*GetShaderResources)(THIS_
 		UINT StartSlot,

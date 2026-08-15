@@ -53,7 +53,11 @@
     <ClCompile Include="HackerContext.cpp" />
     <ClCompile Include="HackerDevice.cpp" />
     <ClCompile Include="HackerDXGI.cpp" />
-    <ClCompile Include="HookAddresses.c" />
+    <ClCompile Include="HookAddresses.c">
+      <ProgramDataBaseFileName>$(IntDir)HookAddresses.pdb</ProgramDataBaseFileName>
+      <MultiProcessorCompilation>false</MultiProcessorCompilation>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="HookedContext.cpp" />
     <ClCompile Include="HookedDevice.cpp" />
     <ClCompile Include="HookedDXGI.cpp" />
@@ -231,6 +235,7 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)HLSLDecompiler;$(SolutionDir)DirectXTK\Inc;$(SolutionDir)D3D_Shaders;$(SolutionDir)pcre2</AdditionalIncludeDirectories>
       <BufferSecurityCheck>true</BufferSecurityCheck>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -257,6 +262,7 @@ call "$(SolutionDir)CopyToGames.bat" "$(TargetDir)" "$(TargetedSDKArchitecture)"
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalIncludeDirectories>$(SolutionDir);$(SolutionDir)HLSLDecompiler;$(SolutionDir)DirectXTK\Inc;$(SolutionDir)D3D_Shaders;$(SolutionDir)pcre2</AdditionalIncludeDirectories>
       <BufferSecurityCheck>true</BufferSecurityCheck>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -286,10 +292,12 @@ call "$(SolutionDir)CopyToGames.bat" "$(TargetDir)" "$(TargetedSDKArchitecture)"
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ModuleDefinitionFile>d3d11Wrapper.def</ModuleDefinitionFile>
@@ -319,10 +327,12 @@ call "$(SolutionDir)CopyToGames.bat" "$(TargetDir)" "$(TargetedSDKArchitecture)"
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ModuleDefinitionFile>d3d11Wrapper.def</ModuleDefinitionFile>
@@ -351,10 +361,12 @@ xcopy "$(SolutionDir)Dependencies\*.*" "$(TargetDir)"  /E /Y /s
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard>stdcpp14</LanguageStandard>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ModuleDefinitionFile>d3d11Wrapper.def</ModuleDefinitionFile>
@@ -381,6 +393,8 @@ xcopy "$(SolutionDir)Dependencies\*.*" "$(TargetDir)"  /E /Y /s
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard>stdcpp14</LanguageStandard>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

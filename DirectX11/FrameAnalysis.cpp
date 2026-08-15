@@ -31,6 +31,16 @@
 static unordered_map<ID3D11CommandList*, FrameAnalysisDeferredBuffersPtr> frame_analysis_deferred_buffer_lists;
 static unordered_map<ID3D11CommandList*, FrameAnalysisDeferredTex2DPtr> frame_analysis_deferred_tex2d_lists;
 
+static const size_t FRAME_ANALYSIS_DUMP_FILE_BUFFER_SIZE = 64 * 1024;
+
+static void configure_dump_file_buffer(FILE *fd, char *buffer, size_t size)
+{
+	if (!fd)
+		return;
+
+	setvbuf(fd, buffer, _IOFBF, size);
+}
+
 FrameAnalysisContext::FrameAnalysisContext(ID3D11Device1 *pDevice, ID3D11DeviceContext1 *pContext) :
 	HackerContext(pDevice, pContext)
 {
@@ -220,7 +230,6 @@ void FrameAnalysisContext::FrameAnalysisLogShaderHash(ID3D11Shader *shader)
 void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *resource)
 {
 	uint32_t hash, orig_hash;
-	uint64_t phash;
 	struct ResourceHashInfo *info;
 
 	if (!G->analyse_frame || !frame_analysis_log || !resource)
@@ -232,13 +241,10 @@ void FrameAnalysisContext::FrameAnalysisLogResourceHashInline(ID3D11Resource *re
 	try {
 		hash = G->mResources.at(resource).hash;
 		orig_hash = G->mResources.at(resource).orig_hash;
-		phash = G->mResources.at(resource).perceptual_hash_valid ? G->mResources.at(resource).perceptual_hash : 0;
 		if (hash)
 			fprintf(frame_analysis_log, " hash=%08x", hash);
 		if (orig_hash != hash)
 			fprintf(frame_analysis_log, " orig_hash=%08x", orig_hash);
-		if (phash)
-			fprintf(frame_analysis_log, " phash=%016llx", phash);
 
 		info = &G->mResourceInfo.at(orig_hash);
 		if (info->hash_contaminated) {
@@ -770,6 +776,37 @@ void FrameAnalysisContext::dedupe_buf_filename_txt(const wchar_t *bin_filename,
 		FALogErr(L"Failed to create buffer filename\n");
 }
 
+void FrameAnalysisContext::dedupe_buf_filename_srv_txt(const wchar_t *bin_filename,
+		wchar_t *txt_filename, size_t size, int idx, DXGI_FORMAT format,
+		UINT stride, UINT offset, UINT first, UINT count)
+{
+	wchar_t *pos;
+	size_t rem;
+
+	copy_until_extension(txt_filename, bin_filename, size, &pos, &rem);
+
+	if (idx != -1)
+		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-srv%i", idx);
+
+	if (format != DXGI_FORMAT_UNKNOWN)
+		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-format=%S", TexFormatStr(format));
+
+	if (offset)
+		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-offset=%u", offset);
+
+	if (stride)
+		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-stride=%u", stride);
+
+	if (first)
+		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-first=%u", first);
+
+	if (count)
+		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-count=%u", count);
+
+	if (FAILED(StringCchPrintfW(pos, rem, L".txt")))
+		FALogErr(L"Failed to create shader resource buffer filename\n");
+}
+
 /*
  * This just treats the buffer as an array of float4s. In the future we might
  * try to use the reflection information in the shaders to add names and
@@ -779,6 +816,7 @@ void FrameAnalysisContext::DumpBufferTxt(wchar_t *filename, D3D11_MAPPED_SUBRESO
 		UINT size, char type, int idx, UINT stride, UINT offset)
 {
 	FILE *fd = NULL;
+	char io_buffer[FRAME_ANALYSIS_DUMP_FILE_BUFFER_SIZE];
 	char *components = "xyzw";
 	float *buf = (float*)map->pData;
 	UINT i, c;
@@ -789,6 +827,7 @@ void FrameAnalysisContext::DumpBufferTxt(wchar_t *filename, D3D11_MAPPED_SUBRESO
 		FALogErr(L"Unable to create %ls: %u\n", filename, err);
 		return;
 	}
+	configure_dump_file_buffer(fd, io_buffer, sizeof(io_buffer));
 
 	if (offset)
 		fprintf(fd, "offset: %u\n", offset);
@@ -1259,6 +1298,91 @@ static int fprint_dxgi_format(FILE *fd, DXGI_FORMAT format, uint8_t *buf)
 	return i * 2;
 }
 
+void FrameAnalysisContext::DumpSRVBufferTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE *map,
+		UINT size, int idx, DXGI_FORMAT format, UINT stride, UINT offset,
+		UINT first, UINT count)
+{
+	FILE *fd = NULL;
+	char io_buffer[FRAME_ANALYSIS_DUMP_FILE_BUFFER_SIZE];
+	uint8_t *buf8 = (uint8_t*)map->pData;
+	uint32_t *buf32;
+	float *buff;
+	UINT format_size, element, pos, end, elem_size, j;
+	uint64_t view_size;
+	errno_t err;
+
+	err = wfopen_ensuring_access(&fd, filename, L"w");
+	if (!fd) {
+		FALogErr(L"Unable to create %ls: %u\n", filename, err);
+		return;
+	}
+	configure_dump_file_buffer(fd, io_buffer, sizeof(io_buffer));
+
+	format_size = dxgi_format_size(format);
+	if (!stride)
+		stride = format_size;
+	if (!stride) {
+		fprintf(fd, "# WARNING: Shader resource buffer has no stride or known format size; assuming 16 byte rows\n");
+		stride = 16;
+	}
+
+	fprintf(fd, "format: %s\n", TexFormatStr(format));
+	fprintf(fd, "byte offset: %u\n", offset);
+	fprintf(fd, "stride: %u\n", stride);
+	if (first || count) {
+		fprintf(fd, "first element: %u\n", first);
+		fprintf(fd, "element count: %u\n", count);
+	}
+
+	if (format != DXGI_FORMAT_UNKNOWN && !format_size)
+		fprintf(fd, "# WARNING: Unknown format size, buffer will be decoded as raw bytes\n");
+	if (format_size > stride)
+		fprintf(fd, "# WARNING: Format size exceeds stride, buffer will be decoded as raw bytes\n");
+	if (offset >= size) {
+		fprintf(fd, "# WARNING: Byte offset is outside the buffer\n");
+		goto out_close;
+	}
+
+	end = size;
+	if (count) {
+		view_size = (uint64_t)count * stride;
+		if (view_size < size - offset)
+			end = min(end, offset + (UINT)view_size);
+	}
+
+	for (element = 0, pos = offset; pos < end; element++, pos += stride) {
+		elem_size = min(stride, end - pos);
+		if (format_size && format_size <= elem_size) {
+			if (idx == -1)
+				fprintf(fd, "t[%u]+000: ", element);
+			else
+				fprintf(fd, "t%i[%u]+000: ", idx, element);
+			fprint_dxgi_format(fd, format, buf8 + pos);
+			fprintf(fd, "\n");
+			continue;
+		}
+
+		fprintf(fd, "\n");
+		buf32 = (uint32_t*)(buf8 + pos);
+		buff = (float*)(buf8 + pos);
+		for (j = 0; j < elem_size / 4; j++) {
+			if (idx == -1)
+				fprintf(fd, "t[%u]+%03u: 0x%08x %.9g\n", element, j * 4, buf32[j], buff[j]);
+			else
+				fprintf(fd, "t%i[%u]+%03u: 0x%08x %.9g\n", idx, element, j * 4, buf32[j], buff[j]);
+		}
+		for (j = j * 4; j < elem_size; j++) {
+			if (idx == -1)
+				fprintf(fd, "t[%u]+%03u: 0x%02x\n", element, j, buf8[pos + j]);
+			else
+				fprintf(fd, "t%i[%u]+%03u: 0x%02x\n", idx, element, j, buf8[pos + j]);
+		}
+	}
+
+out_close:
+	fclose(fd);
+}
+
 
 static void dump_vb_elem(FILE *fd, uint8_t *buf,
 		D3D11_INPUT_ELEMENT_DESC *layout_desc, size_t layout_elements,
@@ -1361,6 +1485,7 @@ void FrameAnalysisContext::DumpVBTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE
 		D3D11_PRIMITIVE_TOPOLOGY topology, DrawCallInfo *call_info)
 {
 	FILE *fd = NULL;
+	char io_buffer[FRAME_ANALYSIS_DUMP_FILE_BUFFER_SIZE];
 	errno_t err;
 	D3D11_INPUT_ELEMENT_DESC *layout_desc = NULL;
 	size_t layout_elements;
@@ -1371,6 +1496,7 @@ void FrameAnalysisContext::DumpVBTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE
 		FALogErr(L"Unable to create %ls: %u\n", filename, err);
 		return;
 	}
+	configure_dump_file_buffer(fd, io_buffer, sizeof(io_buffer));
 
 	if (offset)
 		fprintf(fd, "byte offset: %u\n", offset);
@@ -1452,6 +1578,7 @@ void FrameAnalysisContext::DumpIBTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE
 		D3D11_PRIMITIVE_TOPOLOGY topology)
 {
 	FILE *fd = NULL;
+	char io_buffer[FRAME_ANALYSIS_DUMP_FILE_BUFFER_SIZE];
 	uint16_t *buf16 = (uint16_t*)map->pData;
 	uint32_t *buf32 = (uint32_t*)map->pData;
 	UINT start, end, i;
@@ -1463,6 +1590,7 @@ void FrameAnalysisContext::DumpIBTxt(wchar_t *filename, D3D11_MAPPED_SUBRESOURCE
 		FALogErr(L"Unable to create %ls: %u\n", filename, err);
 		return;
 	}
+	configure_dump_file_buffer(fd, io_buffer, sizeof(io_buffer));
 
 	fprintf(fd, "byte offset: %u\n", offset);
 	if (first || count) {
@@ -1530,6 +1658,7 @@ template <typename DescType>
 void FrameAnalysisContext::DumpDesc(DescType *desc, const wchar_t *filename)
 {
 	FILE *fd = NULL;
+	char io_buffer[FRAME_ANALYSIS_DUMP_FILE_BUFFER_SIZE];
 	char buf[256];
 	errno_t err;
 
@@ -1540,6 +1669,7 @@ void FrameAnalysisContext::DumpDesc(DescType *desc, const wchar_t *filename)
 		FALogErr(L"Unable to create %ls: %u\n", filename, err);
 		return;
 	}
+	configure_dump_file_buffer(fd, io_buffer, sizeof(io_buffer));
 	fwrite(buf, 1, strlen(buf), fd);
 	putc('\n', fd);
 	fclose(fd);
@@ -1736,6 +1866,7 @@ void FrameAnalysisContext::DumpBufferImmediateCtx(ID3D11Buffer *staging, D3D11_B
 	wchar_t *bin_ext;
 	size_t ext;
 	errno_t err;
+	bool dump_buf_txt;
 
 	hr = GetDumpingContext()->Map(staging, 0, D3D11_MAP_READ, 0, &map);
 	if (FAILED(hr)) {
@@ -1769,7 +1900,12 @@ void FrameAnalysisContext::DumpBufferImmediateCtx(ID3D11Buffer *staging, D3D11_B
 		link_deduplicated_files(filename.c_str(), bin_filename);
 	}
 
-	if (analyse_options & FrameAnalysisOptions::FMT_BUF_TXT) {
+	dump_buf_txt = !!(analyse_options & FrameAnalysisOptions::FMT_BUF_TXT);
+	if ((buf_type_mask & FrameAnalysisOptions::DUMP_SRV) &&
+			(analyse_options & FrameAnalysisOptions::FMT_BUF_BIN))
+		dump_buf_txt = true;
+
+	if (dump_buf_txt) {
 		filename.replace(ext, wstring::npos, L".txt");
 
 		if (buf_type_mask & FrameAnalysisOptions::DUMP_CB) {
@@ -1779,7 +1915,6 @@ void FrameAnalysisContext::DumpBufferImmediateCtx(ID3D11Buffer *staging, D3D11_B
 				DumpBufferTxt(txt_filename, &map, orig_desc->ByteWidth, 'c', idx, stride, offset);
 			}
 		} else if (buf_type_mask & FrameAnalysisOptions::DUMP_VB) {
-			determine_vb_count(&count, staged_ib_for_vb, call_info, ib_off_for_vb, ib_fmt);
 			dedupe_buf_filename_vb_txt(bin_filename, txt_filename, MAX_PATH, idx, stride, offset, first, count, layout, topology, call_info);
 			FALogInfo(L"Dumping Buffer %ls -> %ls\n", filename.c_str(), txt_filename);
 			if (GetFileAttributes(txt_filename) == INVALID_FILE_ATTRIBUTES) {
@@ -1790,6 +1925,12 @@ void FrameAnalysisContext::DumpBufferImmediateCtx(ID3D11Buffer *staging, D3D11_B
 			FALogInfo(L"Dumping Buffer %ls -> %ls\n", filename.c_str(), txt_filename);
 			if (GetFileAttributes(txt_filename) == INVALID_FILE_ATTRIBUTES) {
 				DumpIBTxt(txt_filename, &map, orig_desc->ByteWidth, ib_fmt, offset, first, count, topology);
+			}
+		} else if (buf_type_mask & FrameAnalysisOptions::DUMP_SRV) {
+			dedupe_buf_filename_srv_txt(bin_filename, txt_filename, MAX_PATH, idx, ib_fmt, stride, offset, first, count);
+			FALogInfo(L"Dumping Buffer %ls -> %ls\n", filename.c_str(), txt_filename);
+			if (GetFileAttributes(txt_filename) == INVALID_FILE_ATTRIBUTES) {
+				DumpSRVBufferTxt(txt_filename, &map, orig_desc->ByteWidth, idx, ib_fmt, stride, offset, first, count);
 			}
 		} else {
 			// We don't know what kind of buffer this is, so just
@@ -1803,7 +1944,7 @@ void FrameAnalysisContext::DumpBufferImmediateCtx(ID3D11Buffer *staging, D3D11_B
 		}
 		link_deduplicated_files(filename.c_str(), txt_filename);
 	}
-	// TODO: Dump UAV, RT and SRV buffers as text taking their format,
+	// TODO: Dump UAV and RT buffers as text taking their format,
 	// offset, size, first entry and num entries into account.
 
 	if (analyse_options & FrameAnalysisOptions::FMT_DESC) {
@@ -1870,7 +2011,7 @@ void FrameAnalysisContext::DumpBuffer(ID3D11Buffer *buffer, wchar_t *filename,
 
 void FrameAnalysisContext::DumpResource(ID3D11Resource *resource, wchar_t *filename,
 		FrameAnalysisOptions buf_type_mask, int idx, DXGI_FORMAT format,
-		UINT stride, UINT offset)
+		UINT stride, UINT offset, UINT first, UINT count)
 {
 	D3D11_RESOURCE_DIMENSION dim;
 
@@ -1885,7 +2026,7 @@ void FrameAnalysisContext::DumpResource(ID3D11Resource *resource, wchar_t *filen
 		case D3D11_RESOURCE_DIMENSION_BUFFER:
 			if (analyse_options & FrameAnalysisOptions::FMT_BUF_MASK)
 				DumpBuffer((ID3D11Buffer*)resource, filename, buf_type_mask, idx, format, stride, offset,
-						0, 0, NULL, D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED, NULL, NULL, NULL, 0);
+						first, count, NULL, D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED, NULL, NULL, NULL, 0);
 			else
 				FALogInfo(L"Skipped dumping Buffer (No buffer formats enabled): %ls\n", filename);
 			break;
@@ -1964,7 +2105,6 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilename(wchar_t *filename, size_t si
 {
 	struct ResourceHashInfo *info;
 	uint32_t hash, orig_hash;
-	uint64_t phash;
 	wchar_t *pos;
 	size_t rem;
 	HRESULT hr;
@@ -2010,18 +2150,13 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilename(wchar_t *filename, size_t si
 		if (override_hash) {
 			hash = override_hash;
 			orig_hash = G->mResources.at(handle).orig_hash;
-			phash = (G->mResources.at(handle).type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
-				G->mResources.at(handle).perceptual_hash_valid) ? G->mResources.at(handle).perceptual_hash : 0;
 		}
 		else {
 			hash = G->mResources.at(handle).hash;
 			orig_hash = G->mResources.at(handle).orig_hash;
-			phash = (G->mResources.at(handle).type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
-				G->mResources.at(handle).perceptual_hash_valid) ? G->mResources.at(handle).perceptual_hash : 0;
 		}
 	} catch (std::out_of_range) {
 		hash = orig_hash = 0;
-		phash = 0;
 	}
 	LeaveCriticalSection(&G->mResourcesLock);
 
@@ -2046,8 +2181,6 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilename(wchar_t *filename, size_t si
 
 		if (hash != orig_hash)
 			StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"(%08x)", orig_hash);
-		if (phash)
-			StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-phash=%016I64x", phash);
 	}
 	if (analyse_options & FrameAnalysisOptions::FILENAME_HANDLE)
 		StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"@%p", handle);
@@ -2081,7 +2214,6 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilenameResource(wchar_t *filename, s
 {
 	struct ResourceHashInfo *info;
 	uint32_t hash, orig_hash;
-	uint64_t phash;
 	wchar_t *pos;
 	size_t rem;
 	HRESULT hr;
@@ -2105,11 +2237,8 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilenameResource(wchar_t *filename, s
 	try {
 		hash = G->mResources.at(handle).hash;
 		orig_hash = G->mResources.at(handle).orig_hash;
-		phash = (G->mResources.at(handle).type == D3D11_RESOURCE_DIMENSION_TEXTURE2D &&
-			G->mResources.at(handle).perceptual_hash_valid) ? G->mResources.at(handle).perceptual_hash : 0;
 	} catch (std::out_of_range) {
 		hash = orig_hash = 0;
-		phash = 0;
 	}
 	LeaveCriticalSection(&G->mResourcesLock);
 
@@ -2134,8 +2263,6 @@ HRESULT FrameAnalysisContext::FrameAnalysisFilenameResource(wchar_t *filename, s
 
 		if (hash != orig_hash)
 			StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"(%08x)", orig_hash);
-		if (phash)
-			StringCchPrintfExW(pos, rem, &pos, &rem, NULL, L"-phash=%016I64x", phash);
 	}
 
 	// Always do this for update/unmap resource dumps since hashes are likely to clash:
@@ -2156,7 +2283,6 @@ const wchar_t* FrameAnalysisContext::dedupe_tex2d_filename(ID3D11Texture2D *reso
 	D3D11_MAPPED_SUBRESOURCE map;
 	HRESULT hr;
 	uint32_t hash;
-	uint64_t phash;
 	wchar_t dedupe_dir[MAX_PATH];
 
 	// Many of the files dumped with frame analysis are identical, and this
@@ -2196,7 +2322,6 @@ const wchar_t* FrameAnalysisContext::dedupe_tex2d_filename(ID3D11Texture2D *reso
 	// changes in the mid to lower half of the image won't affect the hash.
 	hash = CalcTexture2DDataHashAccurate(orig_desc, (D3D11_SUBRESOURCE_DATA*)&map);
 	hash = CalcTexture2DDescHash(hash, orig_desc);
-	phash = CalcTexture2DPerceptualHash(orig_desc, (D3D11_SUBRESOURCE_DATA*)&map);
 
 	GetDumpingContext()->Unmap(resource, 0);
 
@@ -2204,10 +2329,7 @@ const wchar_t* FrameAnalysisContext::dedupe_tex2d_filename(ID3D11Texture2D *reso
 		format = orig_desc->Format;
 
 	get_deduped_dir(dedupe_dir, MAX_PATH);
-	if (phash)
-		_snwprintf_s(dedupe_filename, size, size, L"%ls\\%08x-phash=%016I64x-%S.XXX", dedupe_dir, hash, phash, TexFormatStr(format));
-	else
-		_snwprintf_s(dedupe_filename, size, size, L"%ls\\%08x-%S.XXX", dedupe_dir, hash, TexFormatStr(format));
+	_snwprintf_s(dedupe_filename, size, size, L"%ls\\%08x-%S.XXX", dedupe_dir, hash, TexFormatStr(format));
 
 	return dedupe_filename;
 err:
@@ -2417,9 +2539,13 @@ void FrameAnalysisContext::_DumpTextures(char shader_type, bool compute,
 {
 	ID3D11Resource *resource;
 	D3D11_SHADER_RESOURCE_VIEW_DESC view_desc;
+	D3D11_RESOURCE_DIMENSION dimension;
+	D3D11_BUFFER_DESC buffer_desc;
+	ID3D11Buffer *buffer;
 	wchar_t filename[MAX_PATH];
 	HRESULT hr;
-	UINT i;
+	DXGI_FORMAT format;
+	UINT i, stride, offset, first, count;
 
 	for (i = 0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT && G->analyse_frame; i++) {
 		if (!views[i])
@@ -2437,17 +2563,51 @@ void FrameAnalysisContext::_DumpTextures(char shader_type, bool compute,
 		}
 
 		views[i]->GetDesc(&view_desc);
+		format = view_desc.Format;
+		stride = 0;
+		offset = 0;
+		first = 0;
+		count = 0;
 
-		// TODO: process description to get offset, strides & size for
-		// buffer & bufferex type SRVs and pass down to dump routines,
-		// although I have no idea how to determine which of the
-		// entries in the two D3D11_BUFFER_SRV unions will be valid.
+		resource->GetType(&dimension);
+		if (dimension == D3D11_RESOURCE_DIMENSION_BUFFER) {
+			buffer = (ID3D11Buffer*)resource;
+			buffer->GetDesc(&buffer_desc);
+
+			switch (view_desc.ViewDimension) {
+			case D3D11_SRV_DIMENSION_BUFFER:
+				stride = dxgi_format_size(format);
+				if (!stride)
+					stride = buffer_desc.StructureByteStride;
+				first = view_desc.Buffer.FirstElement;
+				count = view_desc.Buffer.NumElements;
+				break;
+			case D3D11_SRV_DIMENSION_BUFFEREX:
+				if (view_desc.BufferEx.Flags & D3D11_BUFFEREX_SRV_FLAG_RAW)
+					stride = 4;
+				else
+					stride = dxgi_format_size(format);
+				if (!stride)
+					stride = buffer_desc.StructureByteStride;
+				first = view_desc.BufferEx.FirstElement;
+				count = view_desc.BufferEx.NumElements;
+				break;
+			default:
+				stride = dxgi_format_size(format);
+				if (!stride)
+					stride = buffer_desc.StructureByteStride;
+				break;
+			}
+
+			if (stride)
+				offset = first * stride;
+		}
 
 		hr = FrameAnalysisFilename(filename, MAX_PATH, compute, L"t", shader_type, i, resource);
 		if (SUCCEEDED(hr)) {
 			DumpResource(resource, filename,
 					FrameAnalysisOptions::DUMP_SRV, i,
-					view_desc.Format, 0, 0);
+					format, stride, offset, first, count);
 		}
 
 		resource->Release();
@@ -2549,6 +2709,13 @@ void FrameAnalysisContext::DumpVBs(DrawCallInfo *call_info, ID3D11Buffer *staged
 	if (call_info) {
 		first = call_info->FirstVertex;
 		count = call_info->VertexCount;
+	}
+
+	if (staged_ib && call_info && call_info->IndexCount &&
+			(analyse_options & FrameAnalysisOptions::FMT_BUF_TXT)) {
+		// The indexed span is identical for every VB used by this draw, so
+		// calculate it once and reuse it for each dump.
+		determine_vb_count(&count, staged_ib, call_info, ib_off, ib_fmt);
 	}
 
 	// The format of each vertex buffer cannot be obtained from this call.

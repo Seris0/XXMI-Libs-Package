@@ -781,7 +781,10 @@ static void CreateInfoString(wchar_t* info)
 	const wchar_t* marking_mode;
 	marking_mode = lookup_enum_name(MarkingModeNames, G->marking_mode);
 
-	swprintf_s(info, maxstring, L"Shader Hunting Mode (marking: %ls)", marking_mode);
+	if (G->mouse_select_indexbuffer_pending && G->frame_no == G->mouse_select_indexbuffer_frame)
+		swprintf_s(info, maxstring, L"Shader Hunting Mode (marking: %ls, click-select: armed)", marking_mode);
+	else
+		swprintf_s(info, maxstring, L"Shader Hunting Mode (marking: %ls)", marking_mode);
 }
 
 void Overlay::DrawOverlay(void)

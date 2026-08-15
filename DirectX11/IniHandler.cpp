@@ -1055,11 +1055,13 @@ static vector<float> GetIniFloatList(const wchar_t *section, const wchar_t *key,
 	for (wstring &line : lines) {
 		first = 0;
 		while (true) {
-			first = line.find_first_not_of(L" \t,", first);
+			first = line.find_first_not_of(L" \t\r\n,", first);
 			if (first == wstring::npos)
 				break;
+			if (line[first] == L';')
+				break;
 
-			last = line.find_first_of(L" \t,", first);
+			last = line.find_first_of(L" \t\r\n,;", first);
 			token = line.substr(first, last - first);
 			if (parse_ini_float_token(section, key, token, &value)) {
 				add_unique_float(&ret, value);
@@ -1068,6 +1070,8 @@ static vector<float> GetIniFloatList(const wchar_t *section, const wchar_t *key,
 			}
 
 			if (last == wstring::npos)
+				break;
+			if (line[last] == L';')
 				break;
 			first = last + 1;
 		}
@@ -2711,7 +2715,6 @@ static void ParseShaderRegexSections()
 // function. Used by ParseCommandList to find any unrecognised lines.
 wchar_t *TextureOverrideIniKeys[] = {
 	L"hash",
-	L"phash",
 	L"format",
 	L"width",
 	L"height",
@@ -3216,32 +3219,6 @@ static void warn_if_duplicate_texture_hash(TextureOverride *override, uint32_t h
 	}
 }
 
-static void warn_if_duplicate_texture_phash(TextureOverride *override, uint64_t phash)
-{
-	TextureOverridePHashMap::iterator i;
-	TextureOverrideList::iterator j;
-
-	if (override->has_draw_context_match || override->has_match_priority)
-		return;
-
-	i = lookup_textureoverride_phash(phash);
-	if (i == G->mTextureOverridePHashMap.end())
-		return;
-
-	for (j = i->second.begin(); j != i->second.end(); j++) {
-		if (&(*j) == override)
-			continue;
-		if (j->has_draw_context_match || j->has_match_priority)
-			continue;
-
-		IniWarningW(L"Possible Mod Conflict: Duplicate TextureOverride phash=%016llx\n"
-			   "[%ls]\n"
-			   "[%ls]\n"
-			   "If this is intentional, add a match_priority=n to suppress warning and disambiguate order\n",
-			   phash, j->ini_section.c_str(), override->ini_section.c_str());
-	}
-}
-
 static void index_byte_width_override(TextureOverride* override, uint32_t hash, map<uint32_t, int>& max_byte_width_map)
 {
 	map<uint32_t, int>::iterator max_byte_width;
@@ -3287,9 +3264,7 @@ static void ParseTextureOverrideSections()
 	const wchar_t *id;
 	TextureOverride *override;
 	uint32_t hash;
-	uint64_t phash;
 	bool found;
-	bool found_phash;
 	map<uint32_t, int> max_byte_width_map;
 
 	// Lock entire routine, this can be re-inited.  These shaderoverrides
@@ -3298,7 +3273,6 @@ static void ParseTextureOverrideSections()
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 
 	G->mTextureOverrideMap.clear();
-	G->mTextureOverridePHashMap.clear();
 	G->mFuzzyTextureOverrides.clear();
 
 	lower = ini_sections.lower_bound(wstring(L"TextureOverride"));
@@ -3310,30 +3284,21 @@ static void ParseTextureOverrideSections()
 		LogInfo("[%S]\n", id);
 
 		hash = (uint32_t)GetIniHash(id, L"Hash", 0, &found);
-		phash = GetIniHash(id, L"phash", 0, &found_phash);
-		if (!found && !found_phash) {
+		if (!found) {
 			if (texture_override_section_has_fuzzy_match_keys(id)) {
 				parse_texture_override_fuzzy_match(id);
 				continue;
 			}
 
-			IniWarningW(L"Section missing Hash=, phash= or valid match options\n - [%ls]\n", id);
+			IniWarningW(L"Section missing Hash= or valid match options\n - [%ls]\n", id);
 			continue;
 		}
 
-		if (found && found_phash)
-			IniWarningW(L"Cannot use hash= and phash= together!\n - [%ls]\n", id);
-
 		if (texture_override_section_has_fuzzy_match_keys(id))
-			IniWarningW(L"Cannot use hash=/phash= and match options together!\n - [%ls]\n", id);
+			IniWarningW(L"Cannot use hash= and match options together!\n - [%ls]\n", id);
 
-		if (found) {
-			G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
-			override = &G->mTextureOverrideMap[hash].back();
-		} else {
-			G->mTextureOverridePHashMap[phash].emplace_back();
-			override = &G->mTextureOverridePHashMap[phash].back();
-		}
+		G->mTextureOverrideMap[hash].emplace_back(); // C++ gotcha: invalidates pointers into the vector
+		override = &G->mTextureOverrideMap[hash].back();
 		override->ini_section = id;
 
 		// Important that we do *not* register the command lists yet:
@@ -3341,10 +3306,7 @@ static void ParseTextureOverrideSections()
 
 		// Warn if same hash is used two or more times in sections that
 		// do not have a draw context match or match_priority:
-		if (found)
-			warn_if_duplicate_texture_hash(override, hash);
-		else
-			warn_if_duplicate_texture_phash(override, phash);
+		warn_if_duplicate_texture_hash(override, hash);
 
 		// Record the largest `override_byte_width` value for the hash.
 		if (found && override->override_byte_width != -1) {
@@ -3377,13 +3339,6 @@ static void ParseTextureOverrideSections()
 		// to hold pointers so it can rearrange the pointers however it
 		// likes without changing the TextureOverrides they point to,
 		// similar to how the CommandList data structures work.
-		for (TextureOverride &to : tolkv.second) {
-			registered_command_lists.push_back(&to.command_list);
-			registered_command_lists.push_back(&to.post_command_list);
-		}
-	}
-	for (auto &tolkv : G->mTextureOverridePHashMap) {
-		std::sort(tolkv.second.begin(), tolkv.second.end(), TextureOverrideLess);
 		for (TextureOverride &to : tolkv.second) {
 			registered_command_lists.push_back(&to.command_list);
 			registered_command_lists.push_back(&to.post_command_list);

@@ -310,6 +310,30 @@ struct ShaderOverride {
 		}
 		return false;
 	}
+
+	size_t filter_index_count() const
+	{
+		if (!filter_indices.empty())
+			return filter_indices.size();
+		if (filter_index != FLT_MAX)
+			return 1;
+		return 0;
+	}
+
+	bool get_filter_index(unsigned index, float *ret) const
+	{
+		if (index < filter_indices.size()) {
+			*ret = filter_indices[index];
+			return true;
+		}
+
+		if (index == 0 && filter_index != FLT_MAX) {
+			*ret = filter_index;
+			return true;
+		}
+
+		return false;
+	}
 };
 typedef std::unordered_map<UINT64, struct ShaderOverride> ShaderOverrideMap;
 
@@ -368,7 +392,6 @@ typedef std::unordered_map<ID3D11Resource *, ResourceHandleInfo> ResourceMap;
 // will sort it in the ini parser when we create the list.
 typedef std::vector<struct TextureOverride> TextureOverrideList;
 typedef std::unordered_map<uint32_t, TextureOverrideList> TextureOverrideMap;
-typedef std::unordered_map<UINT64, TextureOverrideList> TextureOverridePHashMap;
 
 // We use this when collecting resource info for ShaderUsage.txt to take a
 // snapshot of the resource handle, hash and original hash. We used to just
@@ -379,10 +402,9 @@ struct ResourceSnapshot
 	ID3D11Resource *handle;
 	uint32_t hash;
 	uint32_t orig_hash;
-	uint64_t perceptual_hash;
 
-	ResourceSnapshot(ID3D11Resource *handle, uint32_t hash, uint32_t orig_hash, uint64_t perceptual_hash):
-		handle(handle), hash(hash), orig_hash(orig_hash), perceptual_hash(perceptual_hash)
+	ResourceSnapshot(ID3D11Resource *handle, uint32_t hash, uint32_t orig_hash):
+		handle(handle), hash(hash), orig_hash(orig_hash)
 	{}
 };
 static inline bool operator<(const ResourceSnapshot &lhs, const ResourceSnapshot &rhs)
@@ -391,8 +413,6 @@ static inline bool operator<(const ResourceSnapshot &lhs, const ResourceSnapshot
 		return (lhs.orig_hash < rhs.orig_hash);
 	if (lhs.hash != rhs.hash)
 		return (lhs.hash < rhs.hash);
-	if (lhs.perceptual_hash != rhs.perceptual_hash)
-		return (lhs.perceptual_hash < rhs.perceptual_hash);
 	return (lhs.handle < rhs.handle);
 }
 
@@ -498,6 +518,13 @@ struct Globals
 	bool suppress_overlay;
 	bool decompile_auto_vs;
 	bool decompile_auto_ps;
+	bool mouse_select_indexbuffer_enabled;
+	bool mouse_select_indexbuffer_pending;
+	bool mouse_select_indexbuffer_capture_failed;
+	unsigned mouse_select_indexbuffer_frame;
+	bool mouse_select_indexbuffer_candidate_valid;
+	uint32_t mouse_select_indexbuffer_candidate_hash;
+	DrawCallInfo mouse_select_indexbuffer_candidate_draw_info;
 
 	bool deferred_contexts_enabled;
 
@@ -617,7 +644,6 @@ struct Globals
 
 	ShaderOverrideMap mShaderOverrideMap;
 	TextureOverrideMap mTextureOverrideMap;
-	TextureOverridePHashMap mTextureOverridePHashMap;
 	FuzzyTextureOverrides mFuzzyTextureOverrides;
 
 	std::unordered_map<UINT64, ShaderModelCacheEntry> mShaderModelCache;
@@ -710,6 +736,12 @@ struct Globals
 		suppress_overlay(false),
 		decompile_auto_vs(false),
 		decompile_auto_ps(false),
+		mouse_select_indexbuffer_enabled(false),
+		mouse_select_indexbuffer_pending(false),
+		mouse_select_indexbuffer_capture_failed(false),
+		mouse_select_indexbuffer_frame(0),
+		mouse_select_indexbuffer_candidate_valid(false),
+		mouse_select_indexbuffer_candidate_hash(0),
 		gSelectedVertexBufferSlotId(-1),
 		gResetSelectedVertexBufferSlotId(false),
 
@@ -882,9 +914,4 @@ static inline ResourceMap::iterator lookup_resource_handle_info(ID3D11Resource *
 static inline TextureOverrideMap::iterator lookup_textureoverride(uint32_t hash)
 {
 	return Profiling::lookup_map(G->mTextureOverrideMap, hash, &Profiling::textureoverride_lookup_overhead);
-}
-
-static inline TextureOverridePHashMap::iterator lookup_textureoverride_phash(UINT64 hash)
-{
-	return Profiling::lookup_map(G->mTextureOverridePHashMap, hash, &Profiling::textureoverride_lookup_overhead);
 }

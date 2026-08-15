@@ -172,17 +172,14 @@ ID3D11Resource* HackerContext::RecordResourceViewStats(ID3D11View *view, std::se
 static ResourceSnapshot SnapshotResource(ID3D11Resource *handle)
 {
 	uint32_t hash = 0, orig_hash = 0;
-	uint64_t perceptual_hash = 0;
 
 	ResourceHandleInfo *info = GetResourceHandleInfo(handle);
 	if (info) {
 		hash = info->hash;
 		orig_hash = info->orig_hash;
-		if (info->perceptual_hash_valid)
-			perceptual_hash = info->perceptual_hash;
 	}
 
-	return ResourceSnapshot(handle, hash, orig_hash, perceptual_hash);
+	return ResourceSnapshot(handle, hash, orig_hash);
 }
 
 void HackerContext::_RecordShaderResourceUsage(ShaderInfoData *shader_info, ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT])
@@ -756,6 +753,249 @@ void HackerContext::DeferredShaderReplacementBeforeDispatch()
 		(mCurrentComputeShaderHandle, mCurrentComputeShader, L"cs");
 }
 
+bool HackerContext::ShouldTrackMouseIndexBufferSelection() const
+{
+	return G->mouse_select_indexbuffer_enabled
+		&& G->mouse_select_indexbuffer_pending
+		&& G->frame_no == G->mouse_select_indexbuffer_frame;
+}
+
+static bool PointInViewport(const D3D11_VIEWPORT &viewport, const POINT &cursor)
+{
+	return cursor.x >= (LONG)viewport.TopLeftX
+		&& cursor.x < (LONG)(viewport.TopLeftX + viewport.Width)
+		&& cursor.y >= (LONG)viewport.TopLeftY
+		&& cursor.y < (LONG)(viewport.TopLeftY + viewport.Height);
+}
+
+static bool PointInRect(const D3D11_RECT &rect, const POINT &cursor)
+{
+	return cursor.x >= rect.left
+		&& cursor.x < rect.right
+		&& cursor.y >= rect.top
+		&& cursor.y < rect.bottom;
+}
+
+static bool TryMapCursorToCurrentRenderTarget(HWND window, ID3D11Resource *resource, POINT *cursor)
+{
+	D3D11_RESOURCE_DIMENSION dim;
+	ID3D11Texture2D *texture = NULL;
+	D3D11_TEXTURE2D_DESC desc;
+	RECT client_rect;
+	POINT client_cursor;
+	LONG client_width;
+	LONG client_height;
+
+	if (!window || !resource || !cursor)
+		return false;
+
+	if (!GetCursorPos(&client_cursor))
+		return false;
+
+	if (!ScreenToClient(window, &client_cursor))
+		return false;
+
+	if (!GetClientRect(window, &client_rect))
+		return false;
+
+	client_width = client_rect.right - client_rect.left;
+	client_height = client_rect.bottom - client_rect.top;
+	if (client_width <= 0 || client_height <= 0)
+		return false;
+
+	if (client_cursor.x < 0 || client_cursor.y < 0
+	 || client_cursor.x >= client_width || client_cursor.y >= client_height)
+		return false;
+
+	resource->GetType(&dim);
+	if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+		return false;
+
+	texture = (ID3D11Texture2D*)resource;
+	texture->GetDesc(&desc);
+	if (!desc.Width || !desc.Height)
+		return false;
+
+	cursor->x = MulDiv(client_cursor.x, (INT)desc.Width, client_width);
+	cursor->y = MulDiv(client_cursor.y, (INT)desc.Height, client_height);
+
+	if (cursor->x >= (LONG)desc.Width)
+		cursor->x = (LONG)desc.Width - 1;
+	if (cursor->y >= (LONG)desc.Height)
+		cursor->y = (LONG)desc.Height - 1;
+
+	return true;
+}
+
+static void CleanupMouseIndexBufferSelectionProbe(ID3D11DeviceContext1 *context, DrawContext &data)
+{
+	if (context && (data.mouse_selection_probe_rasterizer || data.mouse_selection_original_rasterizer))
+		context->RSSetState(data.mouse_selection_original_rasterizer);
+
+	if (context && data.mouse_selection_original_scissor_count)
+		context->RSSetScissorRects(data.mouse_selection_original_scissor_count,
+				data.mouse_selection_original_scissors);
+
+	if (data.mouse_selection_probe_rasterizer) {
+		data.mouse_selection_probe_rasterizer->Release();
+		data.mouse_selection_probe_rasterizer = NULL;
+	}
+
+	if (data.mouse_selection_original_rasterizer) {
+		data.mouse_selection_original_rasterizer->Release();
+		data.mouse_selection_original_rasterizer = NULL;
+	}
+
+	if (data.mouse_selection_query) {
+		data.mouse_selection_query->Release();
+		data.mouse_selection_query = NULL;
+	}
+
+	data.mouse_selection_probe = false;
+	data.mouse_selection_original_scissor_count = 0;
+}
+
+bool HackerContext::CurrentDrawMayAffectCursor(POINT *cursor)
+{
+	UINT num_viewports = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+	D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+	ID3D11RasterizerState *rasterizer_state = NULL;
+	bool inside_viewport = false;
+
+	if (!cursor || mCurrentRenderTargets.empty() || !mCurrentRenderTargets[0])
+		return false;
+
+	if (!TryMapCursorToCurrentRenderTarget(G->hWnd, mCurrentRenderTargets[0], cursor))
+		return false;
+
+	mOrigContext1->RSGetViewports(&num_viewports, viewports);
+	for (UINT i = 0; i < num_viewports; ++i) {
+		if (PointInViewport(viewports[i], *cursor)) {
+			inside_viewport = true;
+			break;
+		}
+	}
+
+	if (!inside_viewport)
+		return false;
+
+	mOrigContext1->RSGetState(&rasterizer_state);
+	if (rasterizer_state) {
+		D3D11_RASTERIZER_DESC desc;
+		rasterizer_state->GetDesc(&desc);
+
+		if (desc.ScissorEnable) {
+			UINT num_rects = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+			D3D11_RECT rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+			bool inside_scissor = false;
+
+			mOrigContext1->RSGetScissorRects(&num_rects, rects);
+			for (UINT i = 0; i < num_rects; ++i) {
+				if (PointInRect(rects[i], *cursor)) {
+					inside_scissor = true;
+					break;
+				}
+			}
+
+			rasterizer_state->Release();
+			return inside_scissor;
+		}
+
+		rasterizer_state->Release();
+	}
+
+	return true;
+}
+
+void HackerContext::UpdateMouseIndexBufferSelectionBeforeDraw(DrawContext &data)
+{
+	D3D11_QUERY_DESC query_desc;
+	D3D11_RASTERIZER_DESC rasterizer_desc;
+	D3D11_RECT probe_rect;
+	HRESULT hr;
+
+	data.mouse_selection_probe = false;
+	data.mouse_selection_query = NULL;
+	data.mouse_selection_original_rasterizer = NULL;
+	data.mouse_selection_probe_rasterizer = NULL;
+	data.mouse_selection_original_scissor_count = 0;
+
+	if (!ShouldTrackMouseIndexBufferSelection())
+		return;
+
+	if (!data.call_info.IndexCount || !mCurrentIndexBuffer || mCurrentIndexBuffer == UINT32_MAX)
+		return;
+
+	// Skip late screen-space passes so we prefer real scene geometry over
+	// fullscreen quads that also happen to cover the clicked pixel.
+	if (!mCurrentDepthTarget)
+		return;
+
+	if (!CurrentDrawMayAffectCursor(&data.mouse_selection_cursor))
+		return;
+
+	query_desc.Query = D3D11_QUERY_OCCLUSION;
+	query_desc.MiscFlags = 0;
+	hr = mHackerDevice->GetPassThroughOrigDevice1()->CreateQuery(&query_desc, &data.mouse_selection_query);
+	if (FAILED(hr) || !data.mouse_selection_query) {
+		G->mouse_select_indexbuffer_capture_failed = true;
+		return;
+	}
+
+	mOrigContext1->RSGetState(&data.mouse_selection_original_rasterizer);
+	mOrigContext1->RSGetScissorRects(&data.mouse_selection_original_scissor_count,
+			data.mouse_selection_original_scissors);
+
+	if (data.mouse_selection_original_rasterizer) {
+		data.mouse_selection_original_rasterizer->GetDesc(&rasterizer_desc);
+	} else {
+		rasterizer_desc.FillMode = D3D11_FILL_SOLID;
+		rasterizer_desc.CullMode = D3D11_CULL_BACK;
+		rasterizer_desc.FrontCounterClockwise = FALSE;
+		rasterizer_desc.DepthBias = 0;
+		rasterizer_desc.DepthBiasClamp = 0.0f;
+		rasterizer_desc.SlopeScaledDepthBias = 0.0f;
+		rasterizer_desc.DepthClipEnable = TRUE;
+		rasterizer_desc.ScissorEnable = FALSE;
+		rasterizer_desc.MultisampleEnable = FALSE;
+		rasterizer_desc.AntialiasedLineEnable = FALSE;
+	}
+
+	if (!rasterizer_desc.ScissorEnable) {
+		rasterizer_desc.ScissorEnable = TRUE;
+		LockResourceCreationMode();
+		hr = mHackerDevice->GetPassThroughOrigDevice1()->CreateRasterizerState(
+				&rasterizer_desc, &data.mouse_selection_probe_rasterizer);
+		UnlockResourceCreationMode();
+		if (FAILED(hr) || !data.mouse_selection_probe_rasterizer) {
+			G->mouse_select_indexbuffer_capture_failed = true;
+			CleanupMouseIndexBufferSelectionProbe(mOrigContext1, data);
+			return;
+		}
+
+		mOrigContext1->RSSetState(data.mouse_selection_probe_rasterizer);
+	}
+
+	probe_rect.left = data.mouse_selection_cursor.x;
+	probe_rect.top = data.mouse_selection_cursor.y;
+	probe_rect.right = data.mouse_selection_cursor.x + 1;
+	probe_rect.bottom = data.mouse_selection_cursor.y + 1;
+	mOrigContext1->RSSetScissorRects(1, &probe_rect);
+	mOrigContext1->Begin(data.mouse_selection_query);
+	data.mouse_selection_probe = true;
+}
+
+void HackerContext::UpdateMouseIndexBufferSelectionAfterDraw(DrawContext &data)
+{
+	if (!data.mouse_selection_probe)
+		return;
+
+	mOrigContext1->End(data.mouse_selection_query);
+	QueueMouseIndexBufferSelectionProbe(data.mouse_selection_query, mCurrentIndexBuffer, data.call_info);
+	data.mouse_selection_query = NULL;
+	CleanupMouseIndexBufferSelectionProbe(mOrigContext1, data);
+}
+
 
 void HackerContext::BeforeDraw(DrawContext &data)
 {
@@ -787,7 +1027,9 @@ void HackerContext::BeforeDraw(DrawContext &data)
 		if (G->track_region_hashes) 
 		{
 			// Register Index Buffer hash.
-			if (G->mSelectedIndexBuffer != 0 && G->mSelectedIndexBuffer != UINT32_MAX || G->mSelectedIndexBufferPos == INT_MAX) {
+			if ((G->mSelectedIndexBuffer != 0 && G->mSelectedIndexBuffer != UINT32_MAX)
+			 || G->mSelectedIndexBufferPos == INT_MAX
+			 || ShouldTrackMouseIndexBufferSelection()) {
 				IndexBufferBinding& b = mCurrentIndexBufferBinding;
 				if (b.buffer && b.offset) {
 					UINT region_offset = GetIndexBufferRegionOffset(b.format, &data.call_info, b.offset);
@@ -925,6 +1167,8 @@ void HackerContext::BeforeDraw(DrawContext &data)
 		LeaveCriticalSection(&G->mCriticalSection);
 	}
 
+	UpdateMouseIndexBufferSelectionBeforeDraw(data);
+
 	if (!G->fix_enabled)
 		goto out_profile;
 
@@ -986,6 +1230,8 @@ void HackerContext::AfterDraw(DrawContext &data)
 
 	if (data.call_info.skip)
 		Profiling::skipped_draw_calls++;
+
+	UpdateMouseIndexBufferSelectionAfterDraw(data);
 
 	for (i = 0; i < 5; i++) {
 		if (data.post_commands[i]) {
@@ -1212,13 +1458,11 @@ bool HackerContext::MapDenyCPURead(
 	if (Subresource != 0)
 		return false;
 
-	if (G->mTextureOverrideMap.empty() && G->mTextureOverridePHashMap.empty())
+	if (G->mTextureOverrideMap.empty())
 		return false;
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 		find_texture_overrides_for_resource_by_hash(pResource, &matches, NULL);
-		if (matches.empty())
-			find_texture_overrides_for_resource_by_phash(pResource, &matches, NULL);
 	LeaveCriticalSection(&G->mCriticalSection);
 
 	if (matches.empty())
@@ -1409,11 +1653,8 @@ void HackerContext::TrackAndDivertUnmap(ID3D11Resource *pResource, UINT Subresou
 		UpdateResourceDataCacheFromMap(pResource, map_info->map.pData, map_info->size, &deallocate_diverted_memory);
 
 	if (Subresource == 0 && map_info->mapped_writable) {
-		UpdateResourcePerceptualHashFromCPU(pResource, map_info->map.pData, map_info->map.RowPitch, map_info->map.DepthPitch);
 		if (G->track_texture_updates == 1)
 			UpdateResourceHashFromCPU(pResource, map_info->map.pData, map_info->map.RowPitch, map_info->map.DepthPitch);
-	} else if (map_info->mapped_writable) {
-		InvalidateResourcePerceptualHash(pResource);
 	}
 
 	if (map_info->orig_pData) {
@@ -1808,8 +2049,6 @@ bool HackerContext::ExpandRegionCopy(ID3D11Resource *pDstResource, UINT DstX,
 
 	EnterCriticalSectionPretty(&G->mCriticalSection);
 		find_texture_overrides_for_resource_by_hash(dstTex, &matches, NULL);
-		if (matches.empty())
-			find_texture_overrides_for_resource_by_phash(dstTex, &matches, NULL);
 	LeaveCriticalSection(&G->mCriticalSection);
 
 	if (matches.empty() || !matches.front()->expand_region_copy)
@@ -1918,11 +2157,8 @@ STDMETHODIMP_(void) HackerContext::CopySubresourceRegion(THIS_
 	// and the hashes might be less predictable. Possibly something to
 	// enable as an option in the future if there is a proven need.
 	if (DstSubresource == 0 && DstX == 0 && DstY == 0 && DstZ == 0 && pSrcBox == NULL) {
-		PropagateResourcePerceptualHash(pDstResource, pSrcResource);
 		if (G->track_texture_updates == 1)
 			PropagateResourceHash(pDstResource, pSrcResource);
-	} else {
-		InvalidateResourcePerceptualHash(pDstResource);
 	}
 
 	if (G->track_region_hashes)
@@ -1971,7 +2207,6 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 				NULL                    // pSrcBox (can be NULL to copy whole buffer)
 			);
 
-			PropagateResourcePerceptualHash(pDstResource, pSrcResource);
 			if (G->track_texture_updates == 1)
 				PropagateResourceHash(pDstResource, pSrcResource);
 
@@ -1981,7 +2216,6 @@ STDMETHODIMP_(void) HackerContext::CopyResource(THIS_
 	
 	mOrigContext1->CopyResource(pDstResource, pSrcResource);
 
-	PropagateResourcePerceptualHash(pDstResource, pSrcResource);
 	if (G->track_texture_updates == 1)
 		PropagateResourceHash(pDstResource, pSrcResource);
 }
@@ -2018,11 +2252,8 @@ STDMETHODIMP_(void) HackerContext::UpdateSubresource(THIS_
 	// and the hashes might be less predictable. Possibly something to
 	// enable as an option in the future if there is a proven need.
 	if (DstSubresource == 0 && pDstBox == NULL) {
-		UpdateResourcePerceptualHashFromCPU(pDstResource, pSrcData, SrcRowPitch, SrcDepthPitch);
 		if (G->track_texture_updates == 1)
 			UpdateResourceHashFromCPU(pDstResource, pSrcData, SrcRowPitch, SrcDepthPitch);
-	} else {
-		InvalidateResourcePerceptualHash(pDstResource);
 	}
 }
 
@@ -3330,10 +3561,8 @@ void STDMETHODCALLTYPE HackerContext::CopySubresourceRegion1(
 		ClearResourceRegionHashCache(pDstResource);
 	}
 	mOrigContext1->CopySubresourceRegion1(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox, CopyFlags);
-	if (DstSubresource == 0 && DstX == 0 && DstY == 0 && DstZ == 0 && pSrcBox == NULL)
-		PropagateResourcePerceptualHash(pDstResource, pSrcResource);
-	else
-		InvalidateResourcePerceptualHash(pDstResource);
+	if (G->track_texture_updates == 1 && DstSubresource == 0 && DstX == 0 && DstY == 0 && DstZ == 0 && pSrcBox == NULL)
+		PropagateResourceHash(pDstResource, pSrcResource);
 }
 
 void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
@@ -3358,10 +3587,8 @@ void STDMETHODCALLTYPE HackerContext::UpdateSubresource1(
 
 	mOrigContext1->UpdateSubresource1(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch, CopyFlags);
 
-	if (DstSubresource == 0 && pDstBox == NULL)
-		UpdateResourcePerceptualHashFromCPU(pDstResource, pSrcData, SrcRowPitch, SrcDepthPitch);
-	else
-		InvalidateResourcePerceptualHash(pDstResource);
+	if (G->track_texture_updates == 1 && DstSubresource == 0 && pDstBox == NULL)
+		UpdateResourceHashFromCPU(pDstResource, pSrcData, SrcRowPitch, SrcDepthPitch);
 }
 
 
@@ -3372,7 +3599,6 @@ void STDMETHODCALLTYPE HackerContext::DiscardResource(
 	if (G->track_region_hashes) {
 		ClearResourceRegionHashCache(pResource);
 	}
-	InvalidateResourcePerceptualHash(pResource);
 	mOrigContext1->DiscardResource(pResource);
 }
 

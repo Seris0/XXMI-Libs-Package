@@ -315,8 +315,6 @@ struct ResourceHandleInfo
 	uint32_t hash;
 	uint32_t orig_hash;	// Original hash at the time of creation
 	uint32_t data_hash;	// Just the data hash for track_texture_updates
-	uint64_t perceptual_hash;
-	bool perceptual_hash_valid;
 
 	// CPU-side copy of the resource data captured via hooks or staging buffer.
 	// Used to compute hashes for arbitrary regions without re-mapping
@@ -345,8 +343,6 @@ struct ResourceHandleInfo
 		hash(0),
 		orig_hash(0),
 		data_hash(0),
-		perceptual_hash(0),
-		perceptual_hash_valid(false),
 		cached_data(nullptr)
 	{}
 
@@ -367,7 +363,6 @@ struct ResourceHandleInfo
 
 	void CacheRegionHash(const RegionHashKeyL2& key, uint32_t hash);
 	uint32_t GetCachedRegionHash(const RegionHashKeyL2& key);
-	void InvalidatePerceptualHash();
 };
 
 struct CopySubresourceRegionContamination
@@ -517,15 +512,12 @@ uint32_t CalcTexture1DDataHash(const D3D11_TEXTURE1D_DESC *pDesc, const D3D11_SU
 uint32_t CalcTexture2DDataHash(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData, bool zero_padding = false);
 uint32_t CalcTexture2DDataHashAccurate(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
 uint32_t CalcTexture3DDataHash(const D3D11_TEXTURE3D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
-uint64_t CalcTexture2DPerceptualHash(const D3D11_TEXTURE2D_DESC *pDesc, const D3D11_SUBRESOURCE_DATA *pInitialData);
 
 ResourceHandleInfo* GetResourceHandleInfo(ID3D11Resource *resource);
 uint32_t GetOrigResourceHash(ID3D11Resource *resource);
 uint32_t GetResourceHash(ID3D11Resource *resource);
-uint64_t GetResourcePerceptualHash(ID3D11Resource *resource);
 static bool CacheBufferData(ID3D11DeviceContext* context, ID3D11Buffer* buffer, ResourceHandleInfo* info);
 void ClearResourceRegionHashCache(ID3D11Resource* resource);
-void InvalidateResourcePerceptualHash(ID3D11Resource *resource);
 UINT GetVertexBufferRegionOffset(UINT stride, DrawCallInfo* call_info, UINT byte_offset);
 UINT GetIndexBufferRegionOffset(DXGI_FORMAT format, DrawCallInfo* call_info, UINT byte_offset);
 UINT GetIndexBufferRegionSize(DXGI_FORMAT format, DrawCallInfo* call_info);
@@ -538,11 +530,8 @@ void MarkResourceHashContaminated(ID3D11Resource *dest, UINT DstSubresource,
 
 void UpdateResourceHashFromCPU(ID3D11Resource *resource,
 	const void *data, UINT rowPitch, UINT depthPitch);
-void UpdateResourcePerceptualHashFromCPU(ID3D11Resource *resource,
-	const void *data, UINT rowPitch, UINT depthPitch);
 
 void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src);
-void PropagateResourcePerceptualHash(ID3D11Resource *dst, ID3D11Resource *src);
 
 bool MapTrackResourceHashUpdate(ID3D11Resource *pResource, UINT Subresource);
 
@@ -770,13 +759,11 @@ typedef std::vector<TextureOverrideFuzzyMatch> TextureOverrideFuzzyMatches;
 TextureOverrideFuzzyMatches* get_fuzzy_matches_by_draw_info(DrawCallInfo* call_info);
 
 template <typename DescType>
-void find_texture_overrides(uint32_t hash, uint64_t phash, const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+void find_texture_overrides(uint32_t hash, const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
 void find_texture_overrides_for_resource_by_hash(ID3D11Resource* resource, TextureOverrideMatches* matches, DrawCallInfo* call_info);
-void find_texture_overrides_for_resource_by_phash(ID3D11Resource* resource, TextureOverrideMatches* matches, DrawCallInfo* call_info);
 void find_texture_overrides_for_resource_desc(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info);
 void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info);
 void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches* matches, DrawCallInfo* call_info);
-void find_texture_override_for_phash(uint64_t phash, TextureOverrideMatches* matches, DrawCallInfo* call_info);
 
 void find_texture_overrides_by_hash_from_fuzzy_matches(uint32_t hash, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info);
 void find_texture_overrides_for_resource_by_hash_from_fuzzy_matches(ID3D11Resource* resource, TextureOverrideFuzzyMatches* fuzzy_matches, TextureOverrideMatches* matches, DrawCallInfo* call_info);

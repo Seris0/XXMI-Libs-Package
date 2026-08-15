@@ -171,10 +171,6 @@ static void DumpUsageRegister(HANDLE f, char *tag, int id, const ResourceSnapsho
 		sprintf(buf, " orig_hash=%08lx", info.orig_hash);
 		WriteFile(f, buf, castStrLen(buf), &written, 0);
 	}
-	if (info.perceptual_hash) {
-		sprintf(buf, " phash=%016llx", info.perceptual_hash);
-		WriteFile(f, buf, castStrLen(buf), &written, 0);
-	}
 
 	try {
 		if (G->mResourceInfo.at(info.orig_hash).hash_contaminated) {
@@ -2104,6 +2100,41 @@ void TimeoutHuntingBuffers()
 }
 
 // User has requested all shaders be re-enabled
+struct MouseIndexBufferSelectionProbeResult
+{
+	ID3D11Query *query;
+	uint32_t hash;
+	DrawCallInfo draw_info;
+
+	MouseIndexBufferSelectionProbeResult(ID3D11Query *query, uint32_t hash, const DrawCallInfo &draw_info) :
+		query(query),
+		hash(hash),
+		draw_info(draw_info)
+	{}
+};
+
+static std::vector<MouseIndexBufferSelectionProbeResult> mouse_indexbuffer_selection_probes;
+
+static void ClearMouseIndexBufferSelectionProbesNoLock()
+{
+	for (auto &probe : mouse_indexbuffer_selection_probes) {
+		if (probe.query)
+			probe.query->Release();
+	}
+	mouse_indexbuffer_selection_probes.clear();
+}
+
+static void ResetMouseIndexBufferSelectionStateNoLock()
+{
+	G->mouse_select_indexbuffer_pending = false;
+	G->mouse_select_indexbuffer_capture_failed = false;
+	G->mouse_select_indexbuffer_frame = 0;
+	G->mouse_select_indexbuffer_candidate_valid = false;
+	G->mouse_select_indexbuffer_candidate_hash = 0;
+	G->mouse_select_indexbuffer_candidate_draw_info = DrawCallInfo();
+	ClearMouseIndexBufferSelectionProbesNoLock();
+}
+
 static void DoneHunting(HackerDevice *device, void *private_data)
 {
 	if (G->hunting != HUNTING_MODE_ENABLED)
@@ -2133,6 +2164,7 @@ static void DoneHunting(HackerDevice *device, void *private_data)
 	G->gSelectedVertexBufferSlotId = -1;
 	G->mSelectedIndexBuffer = -1;
 	G->mSelectedIndexBufferPos = -1;
+	ResetMouseIndexBufferSelectionStateNoLock();
 
 	G->mSelectedPixelShader_VertexBuffer.clear();
 	G->mSelectedPixelShader_IndexBuffer.clear();
@@ -2153,6 +2185,13 @@ static void ToggleHunting(HackerDevice *device, void *private_data)
 		G->hunting = HUNTING_MODE_SOFT_DISABLED;
 	else
 		G->hunting = HUNTING_MODE_ENABLED;
+
+	if (G->hunting != HUNTING_MODE_ENABLED) {
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		ResetMouseIndexBufferSelectionStateNoLock();
+		LeaveCriticalSection(&G->mCriticalSection);
+	}
+
 	LogInfo("> Hunting toggled to %d\n", G->hunting);
 }
 
@@ -2172,6 +2211,20 @@ static void ToggleAutoDecompilePS(HackerDevice *device, void *private_data)
 			G->decompile_auto_ps ? "enabled" : "disabled");
 	LogOverlay(LOG_NOTICE, "> passive pixel shader decompilation %s\n",
 			G->decompile_auto_ps ? "enabled" : "disabled");
+}
+
+static void RequestMouseIndexBufferSelection(HackerDevice *device, void *private_data)
+{
+	if (G->hunting != HUNTING_MODE_ENABLED)
+		return;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	ResetMouseIndexBufferSelectionStateNoLock();
+	G->mouse_select_indexbuffer_pending = true;
+	G->mouse_select_indexbuffer_frame = G->frame_no + 1;
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	LogOverlay(LOG_NOTICE, "> mouse IB selection armed for the next frame\n");
 }
 
 void ParseHuntingSection()
@@ -2210,6 +2263,12 @@ void ParseHuntingSection()
 	Profiling::interval = (INT64)(GetIniFloat(L"Hunting", L"monitor_performance_interval", 1.0f, NULL) * 1000000);
 	RegisterIniKeyBinding(L"Hunting", L"decompile_vs", ToggleAutoDecompileVS, NULL, noRepeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"decompile_ps", ToggleAutoDecompilePS, NULL, noRepeat, NULL);
+	G->mouse_select_indexbuffer_enabled = GetIniBool(L"Hunting", L"mouse_select_indexbuffer", false, NULL);
+	if (!G->mouse_select_indexbuffer_enabled) {
+		EnterCriticalSectionPretty(&G->mCriticalSection);
+		ResetMouseIndexBufferSelectionStateNoLock();
+		LeaveCriticalSection(&G->mCriticalSection);
+	}
 
 	// Don't register the interactive hunting keys when hard disabled. In
 	// this case the only way to turn hunting on is to edit the ini file
@@ -2254,6 +2313,15 @@ void ParseHuntingSection()
 	RegisterIniKeyBinding(L"Hunting", L"next_indexbuffer", NextIndexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_indexbuffer", PrevIndexBuffer, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"mark_indexbuffer", MarkIndexBuffer, NULL, noRepeat, NULL);
+
+	if (G->mouse_select_indexbuffer_enabled) {
+		shared_ptr<InputListener> mouse_select_listener = make_shared<InputCallbacks>(
+			static_cast<InputCallback>(RequestMouseIndexBufferSelection),
+			static_cast<InputCallback>(nullptr),
+			nullptr);
+		RegisterKeyBinding(L"mouse_select_indexbuffer", L"VK_MENU VK_LBUTTON",
+			mouse_select_listener, noRepeat, 0, 0);
+	}
 
 	RegisterIniKeyBinding(L"Hunting", L"next_vertexshader", NextVertexShader, NULL, repeat, NULL);
 	RegisterIniKeyBinding(L"Hunting", L"previous_vertexshader", PrevVertexShader, NULL, repeat, NULL);
@@ -2369,4 +2437,99 @@ void PurgeStaleVisitedBufferHashes(HackerDevice* device)
 	PurgeStaleBuffers(&G->mVisitedVertexBuffers, &G->mVisitedVertexBuffersLastSeenFrame, &G->mSelectedVertexBuffer, &G->mSelectedVertexBufferPos);
 	PurgeStaleBuffers(&G->mVisitedIndexBuffers, &G->mVisitedIndexBuffersLastSeenFrame, &G->mSelectedIndexBuffer, &G->mSelectedIndexBufferPos);
 	LeaveCriticalSection(&G->mCriticalSection);
+}
+
+void QueueMouseIndexBufferSelectionProbe(ID3D11Query *query, uint32_t hash, const DrawCallInfo &draw_info)
+{
+	if (!query)
+		return;
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	if (G->mouse_select_indexbuffer_pending) {
+		mouse_indexbuffer_selection_probes.emplace_back(query, hash, draw_info);
+		query = NULL;
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	if (query)
+		query->Release();
+}
+
+void FinalizeMouseIndexBufferSelection(HackerContext *context)
+{
+	uint32_t hash = 0;
+	DrawCallInfo draw_info;
+	bool capture_failed = false;
+	bool selected = false;
+	ID3D11DeviceContext1 *orig_context = NULL;
+	std::vector<MouseIndexBufferSelectionProbeResult> probes;
+
+	if (!G->mouse_select_indexbuffer_pending || G->frame_no != G->mouse_select_indexbuffer_frame)
+		return;
+
+	if (context)
+		orig_context = context->GetPassThroughOrigContext1();
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	{
+		capture_failed = G->mouse_select_indexbuffer_capture_failed;
+		probes.swap(mouse_indexbuffer_selection_probes);
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	if (!orig_context && !probes.empty()) {
+		capture_failed = true;
+	} else {
+		for (auto &probe : probes) {
+			UINT64 visible_samples = 0;
+			HRESULT hr = S_FALSE;
+
+			if (probe.query) {
+				for (UINT spin = 0; spin < 1024 && hr == S_FALSE; ++spin)
+					hr = orig_context->GetData(probe.query, &visible_samples, sizeof(visible_samples), 0);
+
+				if (hr == S_OK && visible_samples > 0 && probe.hash && probe.hash != UINT32_MAX) {
+					hash = probe.hash;
+					draw_info = probe.draw_info;
+					selected = true;
+				} else if (FAILED(hr) || hr == S_FALSE) {
+					capture_failed = true;
+				}
+
+				probe.query->Release();
+			}
+		}
+	}
+
+	EnterCriticalSectionPretty(&G->mCriticalSection);
+	{
+		if (selected) {
+			auto it = G->mVisitedIndexBuffers.find(hash);
+			if (it == G->mVisitedIndexBuffers.end()) {
+				G->mVisitedIndexBuffers.insert(hash);
+				it = G->mVisitedIndexBuffers.find(hash);
+			}
+
+			G->mSelectedIndexBuffer = hash;
+			G->mSelectedIndexBufferPos = (int)std::distance(G->mVisitedIndexBuffers.begin(), it);
+			G->gSelectedIndexBufferDrawInfo = draw_info;
+			G->mSelectedIndexBuffer_PixelShader.clear();
+			G->mSelectedIndexBuffer_VertexShader.clear();
+
+			if (G->overlay_buffer_hash_lifetime >= 0)
+				G->mVisitedIndexBuffersLastSeenFrame[hash] = G->frame_no;
+		}
+
+		ResetMouseIndexBufferSelectionStateNoLock();
+	}
+	LeaveCriticalSection(&G->mCriticalSection);
+
+	if (selected) {
+		LogOverlay(LOG_NOTICE, "> selected IB %08x from mouse click\n", hash);
+		LogInfo("> mouse click selected index buffer %08x\n", hash);
+	} else if (capture_failed) {
+		LogOverlay(LOG_WARNING, "> mouse IB selection could not finish the draw coverage test\n");
+	} else {
+		LogOverlay(LOG_WARNING, "> no indexed draw covered the clicked pixel\n");
+	}
 }

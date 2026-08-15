@@ -24,6 +24,7 @@ class HackerDevice;
 class HackerContext;
 enum class FrameAnalysisOptions;
 class ResourceCopyTarget;
+struct ShaderOverride;
 
 class CommandListState {
 public:
@@ -839,6 +840,8 @@ enum class ParamOverrideType {
 			// specify filter_index=N to define the value passed in
 			// here. ShaderOverride/ShaderRegex sections can also
 			// carry multiple shader filter indices for equality tests.
+			// Individual indices can be read with ps[0], ps[1], etc.,
+			// and ps_count returns the number of explicit indices.
 			// Special values for no [TextureOverride]
 			// section = 0.0, or [TextureOverride] with no
 			// filter_index = 1.0
@@ -920,6 +923,7 @@ class CommandListOperand :
 	public CommandListEvaluatable {
 	float process_texture_filter(CommandListState*);
 	ID3D11DeviceChild *get_shader_filter_handle(CommandListState*);
+	ShaderOverride *get_shader_filter_override(CommandListState*, bool*);
 	float process_shader_filter(CommandListState*);
 public:
 	// TODO: Break up into separate classes for each operand type
@@ -936,6 +940,9 @@ public:
 	// For texture filters:
 	ResourceCopyTarget texture_filter_target;
 	wchar_t shader_filter_target;
+	bool shader_filter_indexed;
+	bool shader_filter_count;
+	unsigned shader_filter_index;
 
 	// For scissor rectangle:
 	unsigned scissor;
@@ -947,6 +954,10 @@ public:
 		param_component(NULL),
 		param_idx(0),
 		var_ftarget(NULL),
+		shader_filter_target(0),
+		shader_filter_indexed(false),
+		shader_filter_count(false),
+		shader_filter_index(0),
 		scissor(0)
 	{}
 

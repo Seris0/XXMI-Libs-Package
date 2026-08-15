@@ -3,6 +3,7 @@
 //  It implements all the shader management based on user input via key presses from Input.
 
 #include "HackerDevice.h"
+#include "DrawCallInfo.h"
 
 // Custom #include handler used to track which shaders need to be reloaded after an included file is modified
 class MigotoIncludeHandler : public ID3DInclude
@@ -26,6 +27,8 @@ void RegisterVisitedIndexBuffer(uint32_t hash);
 void RegisterVisitedVertexBufferNoLock(uint32_t hash, uint32_t slot_id);
 void RegisterVisitedVertexBuffer(uint32_t hash, uint32_t slot_id);
 void PurgeStaleVisitedBufferHashes(HackerDevice* device);
+void QueueMouseIndexBufferSelectionProbe(ID3D11Query *query, uint32_t hash, const DrawCallInfo &draw_info);
+void FinalizeMouseIndexBufferSelection(HackerContext *context);
 void PassiveDecompileDrawShaders(HackerDevice *device,
 		ID3D11VertexShader *vertex_shader, UINT64 vertex_shader_hash,
 		ID3D11PixelShader *pixel_shader, UINT64 pixel_shader_hash);

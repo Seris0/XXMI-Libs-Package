@@ -8,9 +8,6 @@
 #include "overlay.h"
 
 #include <algorithm>
-#include <array>
-#include <cmath>
-#include <limits>
 
 // DirectXTK headers fail to include their own pre-requisits. We just want
 // GetSurfaceInfo from LoaderHelpers
@@ -19,619 +16,6 @@
 #include "DirectXTK/Src/LoaderHelpers.h"
 
 static UINT CompressedFormatBlockSize(DXGI_FORMAT Format);
-
-namespace {
-	static const UINT TEXTURE_PHASH_NORMALIZED_EDGE = 126;
-	static const UINT TEXTURE_PHASH_DCT_EDGE = 32;
-	static const UINT TEXTURE_PHASH_LOW_FREQ_EDGE = 8;
-	static const UINT TEXTURE_PHASH_MAX_HAMMING_DISTANCE = 6;
-	static const float TEXTURE_PHASH_PI = 3.14159265358979323846f;
-
-	struct TexturePHashL2Key
-	{
-		uint64_t raw_hash;
-		uint16_t aspect_bucket;
-		uint8_t luma_bucket;
-
-		bool operator==(const TexturePHashL2Key& other) const
-		{
-			return raw_hash == other.raw_hash
-				&& aspect_bucket == other.aspect_bucket
-				&& luma_bucket == other.luma_bucket;
-		}
-	};
-
-	struct TexturePHashL2KeyHasher
-	{
-		size_t operator()(const TexturePHashL2Key& key) const
-		{
-			size_t seed = std::hash<uint64_t>()(key.raw_hash);
-			seed ^= (size_t)key.aspect_bucket + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-			seed ^= (size_t)key.luma_bucket + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-			return seed;
-		}
-	};
-
-	struct TexturePHashCanonicalEntry
-	{
-		uint64_t canonical_hash;
-		uint16_t aspect_bucket;
-		uint8_t luma_bucket;
-	};
-
-	struct PHashPixelSampleCache
-	{
-		int block_x;
-		int block_y;
-		float block_luma[16];
-		bool valid;
-
-		PHashPixelSampleCache() :
-			block_x(-1),
-			block_y(-1),
-			valid(false)
-		{}
-	};
-
-	struct TexturePHashInfo
-	{
-		uint64_t raw_hash;
-		uint64_t canonical_hash;
-		uint16_t aspect_bucket;
-		uint8_t luma_bucket;
-
-		TexturePHashInfo() :
-			raw_hash(0),
-			canonical_hash(0),
-			aspect_bucket(0),
-			luma_bucket(0)
-		{}
-	};
-
-	FlatHashMap<TexturePHashL2Key, uint64_t, TexturePHashL2KeyHasher> texture_phash_l2_cache(2048);
-	std::vector<TexturePHashCanonicalEntry> texture_phash_l3_cache;
-
-	static inline uint8_t expand_5_to_8(uint8_t v)
-	{
-		return (uint8_t)((v << 3) | (v >> 2));
-	}
-
-	static inline uint8_t expand_6_to_8(uint8_t v)
-	{
-		return (uint8_t)((v << 2) | (v >> 4));
-	}
-
-	template <typename T>
-	static inline T phash_min(const T& a, const T& b)
-	{
-		return (a < b) ? a : b;
-	}
-
-	template <typename T>
-	static inline T phash_max(const T& a, const T& b)
-	{
-		return (a > b) ? a : b;
-	}
-
-	static inline float clamp01(float v)
-	{
-		return phash_max(0.0f, phash_min(1.0f, v));
-	}
-
-	static inline float rgb_to_luma(float r, float g, float b)
-	{
-		return clamp01(r * 0.299f + g * 0.587f + b * 0.114f);
-	}
-
-	static int popcount64(uint64_t value)
-	{
-		int count = 0;
-		while (value) {
-			value &= (value - 1);
-			count++;
-		}
-		return count;
-	}
-
-	static float half_to_float(uint16_t half)
-	{
-		uint16_t sign = (half >> 15) & 0x1;
-		uint16_t exp = (half >> 10) & 0x1f;
-		uint16_t mantissa = half & 0x3ff;
-
-		if (!exp) {
-			if (!mantissa)
-				return sign ? -0.0f : 0.0f;
-			float value = mantissa / 1024.0f;
-			value = std::ldexp(value, -14);
-			return sign ? -value : value;
-		}
-
-		if (exp == 0x1f) {
-			if (!mantissa)
-				return sign ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-			return std::numeric_limits<float>::quiet_NaN();
-		}
-
-		float value = 1.0f + mantissa / 1024.0f;
-		value = std::ldexp(value, exp - 15);
-		return sign ? -value : value;
-	}
-
-	static void decode_bc1_block(const uint8_t *block, float *out_luma)
-	{
-		uint16_t c0 = block[0] | (block[1] << 8);
-		uint16_t c1 = block[2] | (block[3] << 8);
-		uint8_t r0 = expand_5_to_8((uint8_t)((c0 >> 11) & 0x1f));
-		uint8_t g0 = expand_6_to_8((uint8_t)((c0 >> 5) & 0x3f));
-		uint8_t b0 = expand_5_to_8((uint8_t)(c0 & 0x1f));
-		uint8_t r1 = expand_5_to_8((uint8_t)((c1 >> 11) & 0x1f));
-		uint8_t g1 = expand_6_to_8((uint8_t)((c1 >> 5) & 0x3f));
-		uint8_t b1 = expand_5_to_8((uint8_t)(c1 & 0x1f));
-		float palette[4];
-
-		palette[0] = rgb_to_luma(r0 / 255.0f, g0 / 255.0f, b0 / 255.0f);
-		palette[1] = rgb_to_luma(r1 / 255.0f, g1 / 255.0f, b1 / 255.0f);
-
-		if (c0 > c1) {
-			palette[2] = (2.0f * palette[0] + palette[1]) / 3.0f;
-			palette[3] = (palette[0] + 2.0f * palette[1]) / 3.0f;
-		} else {
-			palette[2] = (palette[0] + palette[1]) * 0.5f;
-			palette[3] = 0.0f;
-		}
-
-		uint32_t indices = block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24);
-		for (int i = 0; i < 16; i++) {
-			out_luma[i] = palette[(indices >> (i * 2)) & 0x3];
-		}
-	}
-
-	static void decode_bc2_alpha(const uint8_t *block, float *out_alpha)
-	{
-		for (int row = 0; row < 4; row++) {
-			uint16_t alpha_row = block[row * 2] | (block[row * 2 + 1] << 8);
-			for (int col = 0; col < 4; col++) {
-				out_alpha[row * 4 + col] = ((alpha_row >> (col * 4)) & 0xf) / 15.0f;
-			}
-		}
-	}
-
-	static void decode_bc3_alpha(const uint8_t *block, float *out_alpha)
-	{
-		uint8_t a0 = block[0];
-		uint8_t a1 = block[1];
-		float palette[8];
-		uint64_t alpha_bits = 0;
-
-		palette[0] = a0 / 255.0f;
-		palette[1] = a1 / 255.0f;
-		if (a0 > a1) {
-			for (int i = 1; i <= 6; i++) {
-				palette[i + 1] = ((7 - i) * palette[0] + i * palette[1]) / 7.0f;
-			}
-		} else {
-			for (int i = 1; i <= 4; i++) {
-				palette[i + 1] = ((5 - i) * palette[0] + i * palette[1]) / 5.0f;
-			}
-			palette[6] = 0.0f;
-			palette[7] = 1.0f;
-		}
-
-		for (int i = 0; i < 6; i++) {
-			alpha_bits |= (uint64_t)block[2 + i] << (8 * i);
-		}
-		for (int i = 0; i < 16; i++) {
-			out_alpha[i] = palette[(alpha_bits >> (i * 3)) & 0x7];
-		}
-	}
-
-	static void decode_bc4_block(const uint8_t *block, float *out_values)
-	{
-		decode_bc3_alpha(block, out_values);
-	}
-
-	static bool decode_block_compressed_luma(DXGI_FORMAT format, const uint8_t *base, UINT row_pitch,
-		UINT width, UINT height, UINT x, UINT y, PHashPixelSampleCache *cache, float *out_luma)
-	{
-		UINT block_x = x / 4;
-		UINT block_y = y / 4;
-		UINT blocks_per_row = (width + 3) / 4;
-		UINT block_size = CompressedFormatBlockSize(format);
-		const uint8_t *block;
-		float alpha[16];
-		float green[16];
-
-		if (!block_size)
-			return false;
-
-		if (!cache->valid || cache->block_x != (int)block_x || cache->block_y != (int)block_y) {
-			block = base + block_y * row_pitch + block_x * block_size;
-
-			switch (format) {
-				case DXGI_FORMAT_BC1_TYPELESS:
-				case DXGI_FORMAT_BC1_UNORM:
-				case DXGI_FORMAT_BC1_UNORM_SRGB:
-					decode_bc1_block(block, cache->block_luma);
-					break;
-				case DXGI_FORMAT_BC2_TYPELESS:
-				case DXGI_FORMAT_BC2_UNORM:
-				case DXGI_FORMAT_BC2_UNORM_SRGB:
-					decode_bc1_block(block + 8, cache->block_luma);
-					decode_bc2_alpha(block, alpha);
-					for (int i = 0; i < 16; i++)
-						cache->block_luma[i] *= alpha[i];
-					break;
-				case DXGI_FORMAT_BC3_TYPELESS:
-				case DXGI_FORMAT_BC3_UNORM:
-				case DXGI_FORMAT_BC3_UNORM_SRGB:
-					decode_bc1_block(block + 8, cache->block_luma);
-					decode_bc3_alpha(block, alpha);
-					for (int i = 0; i < 16; i++)
-						cache->block_luma[i] *= alpha[i];
-					break;
-				case DXGI_FORMAT_BC4_TYPELESS:
-				case DXGI_FORMAT_BC4_UNORM:
-				case DXGI_FORMAT_BC4_SNORM:
-					decode_bc4_block(block, cache->block_luma);
-					break;
-				case DXGI_FORMAT_BC5_TYPELESS:
-				case DXGI_FORMAT_BC5_UNORM:
-				case DXGI_FORMAT_BC5_SNORM:
-					decode_bc4_block(block, cache->block_luma);
-					decode_bc4_block(block + 8, green);
-					for (int i = 0; i < 16; i++)
-						cache->block_luma[i] = (cache->block_luma[i] + green[i]) * 0.5f;
-					break;
-				default:
-					return false;
-			}
-
-			cache->block_x = (int)block_x;
-			cache->block_y = (int)block_y;
-			cache->valid = true;
-		}
-
-		if (block_x >= blocks_per_row || y >= height)
-			return false;
-
-		*out_luma = cache->block_luma[(y & 3) * 4 + (x & 3)];
-		return true;
-	}
-
-	static bool sample_uncompressed_luma(DXGI_FORMAT format, const uint8_t *base, UINT row_pitch,
-		UINT x, UINT y, float *out_luma)
-	{
-		const uint8_t *row = base + row_pitch * y;
-		switch (format) {
-			case DXGI_FORMAT_R8_UNORM:
-			case DXGI_FORMAT_A8_UNORM:
-				*out_luma = row[x] / 255.0f;
-				return true;
-			case DXGI_FORMAT_R8G8_UNORM:
-				*out_luma = (row[x * 2] + row[x * 2 + 1]) / (255.0f * 2.0f);
-				return true;
-			case DXGI_FORMAT_B5G6R5_UNORM:
-			{
-				uint16_t pixel = ((const uint16_t*)row)[x];
-				float r = expand_5_to_8((uint8_t)((pixel >> 11) & 0x1f)) / 255.0f;
-				float g = expand_6_to_8((uint8_t)((pixel >> 5) & 0x3f)) / 255.0f;
-				float b = expand_5_to_8((uint8_t)(pixel & 0x1f)) / 255.0f;
-				*out_luma = rgb_to_luma(r, g, b);
-				return true;
-			}
-			case DXGI_FORMAT_B5G5R5A1_UNORM:
-			{
-				uint16_t pixel = ((const uint16_t*)row)[x];
-				float r = expand_5_to_8((uint8_t)((pixel >> 10) & 0x1f)) / 255.0f;
-				float g = expand_5_to_8((uint8_t)((pixel >> 5) & 0x1f)) / 255.0f;
-				float b = expand_5_to_8((uint8_t)(pixel & 0x1f)) / 255.0f;
-				float a = (pixel & 0x8000) ? 1.0f : 0.0f;
-				*out_luma = rgb_to_luma(r, g, b) * a;
-				return true;
-			}
-			case DXGI_FORMAT_B4G4R4A4_UNORM:
-			{
-				uint16_t pixel = ((const uint16_t*)row)[x];
-				float b = ((pixel >> 0) & 0xf) / 15.0f;
-				float g = ((pixel >> 4) & 0xf) / 15.0f;
-				float r = ((pixel >> 8) & 0xf) / 15.0f;
-				float a = ((pixel >> 12) & 0xf) / 15.0f;
-				*out_luma = rgb_to_luma(r, g, b) * a;
-				return true;
-			}
-			case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-			case DXGI_FORMAT_B8G8R8A8_UNORM:
-			case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-			{
-				const uint8_t *pixel = row + x * 4;
-				*out_luma = rgb_to_luma(pixel[2] / 255.0f, pixel[1] / 255.0f, pixel[0] / 255.0f) * (pixel[3] / 255.0f);
-				return true;
-			}
-			case DXGI_FORMAT_B8G8R8X8_TYPELESS:
-			case DXGI_FORMAT_B8G8R8X8_UNORM:
-			case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
-			{
-				const uint8_t *pixel = row + x * 4;
-				*out_luma = rgb_to_luma(pixel[2] / 255.0f, pixel[1] / 255.0f, pixel[0] / 255.0f);
-				return true;
-			}
-			case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-			case DXGI_FORMAT_R8G8B8A8_UNORM:
-			case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-			case DXGI_FORMAT_R8G8B8A8_UINT:
-			case DXGI_FORMAT_R8G8B8A8_SNORM:
-			case DXGI_FORMAT_R8G8B8A8_SINT:
-			{
-				const uint8_t *pixel = row + x * 4;
-				*out_luma = rgb_to_luma(pixel[0] / 255.0f, pixel[1] / 255.0f, pixel[2] / 255.0f) * (pixel[3] / 255.0f);
-				return true;
-			}
-			case DXGI_FORMAT_R16_UNORM:
-			{
-				*out_luma = ((const uint16_t*)row)[x] / 65535.0f;
-				return true;
-			}
-			case DXGI_FORMAT_R16_FLOAT:
-			{
-				*out_luma = clamp01(half_to_float(((const uint16_t*)row)[x]));
-				return true;
-			}
-			case DXGI_FORMAT_R16G16_FLOAT:
-			{
-				const uint16_t *pixel = ((const uint16_t*)row) + x * 2;
-				*out_luma = clamp01((half_to_float(pixel[0]) + half_to_float(pixel[1])) * 0.5f);
-				return true;
-			}
-			case DXGI_FORMAT_R16G16B16A16_FLOAT:
-			{
-				const uint16_t *pixel = ((const uint16_t*)row) + x * 4;
-				*out_luma = rgb_to_luma(clamp01(half_to_float(pixel[0])),
-					clamp01(half_to_float(pixel[1])),
-					clamp01(half_to_float(pixel[2]))) * clamp01(half_to_float(pixel[3]));
-				return true;
-			}
-			default:
-				return false;
-		}
-	}
-
-	static bool sample_texture2d_luma(const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
-		UINT x, UINT y, PHashPixelSampleCache *cache, float *out_luma)
-	{
-		if (!desc || !data || !data->pSysMem || x >= desc->Width || y >= desc->Height)
-			return false;
-
-		const uint8_t *base = (const uint8_t*)data->pSysMem;
-		if (CompressedFormatBlockSize(desc->Format)) {
-			return decode_block_compressed_luma(desc->Format, base, data->SysMemPitch,
-				desc->Width, desc->Height, x, y, cache, out_luma);
-		}
-
-		return sample_uncompressed_luma(desc->Format, base, data->SysMemPitch, x, y, out_luma);
-	}
-
-	static bool bilinear_sample_texture2d_luma(const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
-		float x, float y, PHashPixelSampleCache *cache, float *out_luma)
-	{
-		UINT x0, y0, x1, y1;
-		float fx, fy;
-		float c00, c10, c01, c11;
-
-		if (!desc || !data || !out_luma)
-			return false;
-
-		x = phash_max(0.0f, phash_min(x, (float)desc->Width - 1.0f));
-		y = phash_max(0.0f, phash_min(y, (float)desc->Height - 1.0f));
-
-		x0 = (UINT)floorf(x);
-		y0 = (UINT)floorf(y);
-		x1 = phash_min(x0 + 1, desc->Width - 1);
-		y1 = phash_min(y0 + 1, desc->Height - 1);
-		fx = x - x0;
-		fy = y - y0;
-
-		if (!sample_texture2d_luma(desc, data, x0, y0, cache, &c00)
-		 || !sample_texture2d_luma(desc, data, x1, y0, cache, &c10)
-		 || !sample_texture2d_luma(desc, data, x0, y1, cache, &c01)
-		 || !sample_texture2d_luma(desc, data, x1, y1, cache, &c11))
-			return false;
-
-		*out_luma =
-			(1.0f - fx) * (1.0f - fy) * c00 +
-			fx * (1.0f - fy) * c10 +
-			(1.0f - fx) * fy * c01 +
-			fx * fy * c11;
-		return true;
-	}
-
-	static bool resize_texture_luma(const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
-		UINT target_width, UINT target_height, std::vector<float> *out)
-	{
-		PHashPixelSampleCache cache;
-		float src_x_scale;
-		float src_y_scale;
-
-		if (!out)
-			return false;
-
-		out->assign(target_width * target_height, 0.0f);
-		if (!desc || !data || !data->pSysMem || !desc->Width || !desc->Height)
-			return false;
-
-		src_x_scale = (float)desc->Width / target_width;
-		src_y_scale = (float)desc->Height / target_height;
-
-		for (UINT y = 0; y < target_height; y++) {
-			for (UINT x = 0; x < target_width; x++) {
-				float luma;
-				float sample_x = (x + 0.5f) * src_x_scale - 0.5f;
-				float sample_y = (y + 0.5f) * src_y_scale - 0.5f;
-				if (!bilinear_sample_texture2d_luma(desc, data, sample_x, sample_y, &cache, &luma))
-					return false;
-				(*out)[y * target_width + x] = luma;
-			}
-		}
-
-		return true;
-	}
-
-	static void resize_grayscale_bilinear(const std::vector<float>& src, UINT src_width, UINT src_height,
-		UINT dst_width, UINT dst_height, std::vector<float> *dst)
-	{
-		if (!dst)
-			return;
-
-		dst->assign(dst_width * dst_height, 0.0f);
-		for (UINT y = 0; y < dst_height; y++) {
-			float sample_y = ((y + 0.5f) * src_height / dst_height) - 0.5f;
-			sample_y = phash_max(0.0f, phash_min(sample_y, (float)src_height - 1.0f));
-			float sy0f = floorf(sample_y);
-			UINT sy0 = (UINT)phash_min(sy0f, (float)src_height - 1.0f);
-			UINT sy1 = phash_min(sy0 + 1, src_height - 1);
-			float fy = sample_y - sy0;
-			for (UINT x = 0; x < dst_width; x++) {
-				float sample_x = ((x + 0.5f) * src_width / dst_width) - 0.5f;
-				sample_x = phash_max(0.0f, phash_min(sample_x, (float)src_width - 1.0f));
-				float sx0f = floorf(sample_x);
-				UINT sx0 = (UINT)phash_min(sx0f, (float)src_width - 1.0f);
-				UINT sx1 = phash_min(sx0 + 1, src_width - 1);
-				float fx = sample_x - sx0;
-
-				float c00 = src[sy0 * src_width + sx0];
-				float c10 = src[sy0 * src_width + sx1];
-				float c01 = src[sy1 * src_width + sx0];
-				float c11 = src[sy1 * src_width + sx1];
-
-				(*dst)[y * dst_width + x] =
-					(1.0f - fx) * (1.0f - fy) * c00 +
-					fx * (1.0f - fy) * c10 +
-					(1.0f - fx) * fy * c01 +
-					fx * fy * c11;
-			}
-		}
-	}
-
-	static uint64_t compute_dct_phash64(const std::vector<float>& normalized, uint8_t *out_luma_bucket)
-	{
-		static bool tables_initialized = false;
-		static float cos_table[TEXTURE_PHASH_LOW_FREQ_EDGE][TEXTURE_PHASH_DCT_EDGE];
-		std::array<float, TEXTURE_PHASH_LOW_FREQ_EDGE * TEXTURE_PHASH_LOW_FREQ_EDGE> coeffs;
-		std::array<float, TEXTURE_PHASH_LOW_FREQ_EDGE * TEXTURE_PHASH_LOW_FREQ_EDGE - 1> threshold_values;
-		float average_luma = 0.0f;
-		uint64_t hash = 0;
-		size_t coeff_index = 0;
-
-		if (!tables_initialized) {
-			for (UINT u = 0; u < TEXTURE_PHASH_LOW_FREQ_EDGE; u++) {
-				for (UINT x = 0; x < TEXTURE_PHASH_DCT_EDGE; x++) {
-					cos_table[u][x] = cosf(((2.0f * x + 1.0f) * u * TEXTURE_PHASH_PI) / (2.0f * TEXTURE_PHASH_DCT_EDGE));
-				}
-			}
-			tables_initialized = true;
-		}
-
-		for (float value : normalized)
-			average_luma += value;
-		average_luma /= (float)normalized.size();
-		if (out_luma_bucket)
-			*out_luma_bucket = (uint8_t)phash_min(255.0f, floorf(average_luma * 255.0f));
-
-		for (UINT v = 0; v < TEXTURE_PHASH_LOW_FREQ_EDGE; v++) {
-			for (UINT u = 0; u < TEXTURE_PHASH_LOW_FREQ_EDGE; u++) {
-				float sum = 0.0f;
-				float alpha_u = (u == 0) ? (1.0f / sqrtf((float)TEXTURE_PHASH_DCT_EDGE)) : sqrtf(2.0f / TEXTURE_PHASH_DCT_EDGE);
-				float alpha_v = (v == 0) ? (1.0f / sqrtf((float)TEXTURE_PHASH_DCT_EDGE)) : sqrtf(2.0f / TEXTURE_PHASH_DCT_EDGE);
-
-				for (UINT y = 0; y < TEXTURE_PHASH_DCT_EDGE; y++) {
-					for (UINT x = 0; x < TEXTURE_PHASH_DCT_EDGE; x++) {
-						sum += normalized[y * TEXTURE_PHASH_DCT_EDGE + x] * cos_table[u][x] * cos_table[v][y];
-					}
-				}
-				coeffs[coeff_index++] = sum * alpha_u * alpha_v;
-			}
-		}
-
-		for (size_t i = 1; i < coeffs.size(); i++)
-			threshold_values[i - 1] = coeffs[i];
-		std::nth_element(threshold_values.begin(),
-			threshold_values.begin() + threshold_values.size() / 2,
-			threshold_values.end());
-		float median = threshold_values[threshold_values.size() / 2];
-
-		for (size_t i = 0; i < coeffs.size(); i++) {
-			if (coeffs[i] >= median)
-				hash |= (1ull << i);
-		}
-		return hash;
-	}
-
-	static uint16_t get_aspect_bucket(UINT width, UINT height)
-	{
-		if (!width || !height)
-			return 0;
-		return (uint16_t)phash_min(65535u, (UINT)((width * 256ull) / phash_max(height, 1u)));
-	}
-
-	static uint64_t canonicalize_texture_phash(uint64_t raw_hash, uint16_t aspect_bucket, uint8_t luma_bucket)
-	{
-		TexturePHashL2Key key{ raw_hash, aspect_bucket, luma_bucket };
-		uint64_t canonical_hash = raw_hash;
-
-		if (!raw_hash)
-			return 0;
-
-		EnterCriticalSectionPretty(&G->mCriticalSection);
-
-		if (uint64_t *cached = texture_phash_l2_cache.find_ptr(key)) {
-			canonical_hash = *cached;
-			LeaveCriticalSection(&G->mCriticalSection);
-			return canonical_hash;
-		}
-
-		for (TexturePHashCanonicalEntry &entry : texture_phash_l3_cache) {
-			if (entry.aspect_bucket != aspect_bucket)
-				continue;
-			if (std::abs((int)entry.luma_bucket - (int)luma_bucket) > 8)
-				continue;
-			if (popcount64(entry.canonical_hash ^ raw_hash) <= TEXTURE_PHASH_MAX_HAMMING_DISTANCE) {
-				canonical_hash = entry.canonical_hash;
-				break;
-			}
-		}
-
-		if (canonical_hash == raw_hash) {
-			texture_phash_l3_cache.push_back({ raw_hash, aspect_bucket, luma_bucket });
-		}
-		texture_phash_l2_cache.insert(key, canonical_hash);
-
-		LeaveCriticalSection(&G->mCriticalSection);
-		return canonical_hash;
-	}
-
-	static bool compute_texture2d_phash_info(const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
-		TexturePHashInfo *out_info)
-	{
-		std::vector<float> normalized;
-		std::vector<float> dct_input;
-		uint8_t luma_bucket = 0;
-
-		if (!out_info || !desc || !data || !data->pSysMem)
-			return false;
-
-		if (!resize_texture_luma(desc, data, TEXTURE_PHASH_NORMALIZED_EDGE, TEXTURE_PHASH_NORMALIZED_EDGE, &normalized))
-			return false;
-
-		resize_grayscale_bilinear(normalized, TEXTURE_PHASH_NORMALIZED_EDGE, TEXTURE_PHASH_NORMALIZED_EDGE,
-			TEXTURE_PHASH_DCT_EDGE, TEXTURE_PHASH_DCT_EDGE, &dct_input);
-
-		out_info->raw_hash = compute_dct_phash64(dct_input, &luma_bucket);
-		out_info->aspect_bucket = get_aspect_bucket(desc->Width, desc->Height);
-		out_info->luma_bucket = luma_bucket;
-		out_info->canonical_hash = canonicalize_texture_phash(out_info->raw_hash, out_info->aspect_bucket, out_info->luma_bucket);
-		return !!out_info->canonical_hash;
-	}
-}
 
 // Overloaded functions to log any kind of resource description (useful to call
 // from templates):
@@ -1480,26 +864,6 @@ uint32_t GetResourceHash(ID3D11Resource *resource)
 	return 0;
 }
 
-uint64_t GetResourcePerceptualHash(ID3D11Resource *resource)
-{
-	ResourceHandleInfo *handle_info = GetResourceHandleInfo(resource);
-	if (handle_info && handle_info->perceptual_hash_valid)
-		return handle_info->perceptual_hash;
-	return 0;
-}
-
-uint64_t CalcTexture2DPerceptualHash(
-	const D3D11_TEXTURE2D_DESC *pDesc,
-	const D3D11_SUBRESOURCE_DATA *pInitialData)
-{
-	TexturePHashInfo info;
-
-	if (!compute_texture2d_phash_info(pDesc, pInitialData, &info))
-		return 0;
-
-	return info.canonical_hash;
-}
-
 uint32_t CalcTexture1DDataHash(
 	const D3D11_TEXTURE1D_DESC *pDesc,
 	const D3D11_SUBRESOURCE_DATA *pInitialData)
@@ -1740,8 +1104,6 @@ void UpdateResourceHashFromCPU(ID3D11Resource *resource,
 {
 	D3D11_RESOURCE_DIMENSION dim;
 	D3D11_SUBRESOURCE_DATA initialData;
-	ID3D11Texture2D *tex2D;
-	ID3D11Texture3D *tex3D;
 	D3D11_TEXTURE2D_DESC *desc2D;
 	D3D11_TEXTURE3D_DESC *desc3D;
 	uint32_t old_data_hash, old_hash;
@@ -1785,25 +1147,18 @@ void UpdateResourceHashFromCPU(ID3D11Resource *resource,
 	resource->GetType(&dim);
 	switch (dim) {
 		case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
-			tex2D = (ID3D11Texture2D*)resource;
-
 			desc2D = &info->desc2D;
 			// TODO: tex2D->GetDesc(&desc2D); then fix up mip-maps if necessary
 
 			info->data_hash = CalcTexture2DDataHash(desc2D, &initialData);
 			info->hash = CalcTexture2DDescHash(info->data_hash, desc2D);
-			info->perceptual_hash = CalcTexture2DPerceptualHash(desc2D, &initialData);
-			info->perceptual_hash_valid = !!info->perceptual_hash;
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
-			tex3D = (ID3D11Texture3D*)resource;
-
 			desc3D = &info->desc3D;
 			// TODO: tex3D->GetDesc(&desc3D); then fix up mip-maps if necessary
 
 			info->data_hash = CalcTexture3DDataHash(desc3D, &initialData);
 			info->hash = CalcTexture3DDescHash(info->data_hash, desc3D);
-			info->InvalidatePerceptualHash();
 			break;
 	}
 
@@ -1816,38 +1171,6 @@ out_unlock:
 
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
 		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
-}
-
-void UpdateResourcePerceptualHashFromCPU(ID3D11Resource *resource,
-	const void *data, UINT rowPitch, UINT depthPitch)
-{
-	D3D11_SUBRESOURCE_DATA initialData;
-	ResourceHandleInfo *info = NULL;
-
-	if (!resource || !data)
-		return;
-
-	EnterCriticalSectionPretty(&G->mCriticalSection);
-
-	info = GetResourceHandleInfo(resource);
-	if (!info)
-		goto out_unlock;
-
-	if (info->type != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
-		goto out_invalidate;
-
-	initialData.pSysMem = data;
-	initialData.SysMemPitch = rowPitch;
-	initialData.SysMemSlicePitch = depthPitch;
-
-	info->perceptual_hash = CalcTexture2DPerceptualHash(&info->desc2D, &initialData);
-	info->perceptual_hash_valid = !!info->perceptual_hash;
-	goto out_unlock;
-
-out_invalidate:
-	info->InvalidatePerceptualHash();
-out_unlock:
-	LeaveCriticalSection(&G->mCriticalSection);
 }
 
 void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src)
@@ -1876,9 +1199,7 @@ void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src)
 		goto out_unlock;
 
 	// If nothing observable changes we can skip the bookkeeping.
-	if (src_info->data_hash == dst_info->data_hash
-	 && src_info->perceptual_hash_valid == dst_info->perceptual_hash_valid
-	 && src_info->perceptual_hash == dst_info->perceptual_hash)
+	if (src_info->data_hash == dst_info->data_hash)
 		goto out_unlock;
 
 	// XXX: If the destination had an initial data but the source did not
@@ -1903,19 +1224,12 @@ void PropagateResourceHash(ID3D11Resource *dst, ID3D11Resource *src)
 			// TODO: tex2D->GetDesc(&desc2D); then fix up mip-maps if necessary
 
 			dst_info->hash = CalcTexture2DDescHash(dst_info->data_hash, desc2D);
-			if (src_info->perceptual_hash_valid) {
-				dst_info->perceptual_hash = src_info->perceptual_hash;
-				dst_info->perceptual_hash_valid = true;
-			} else {
-				dst_info->InvalidatePerceptualHash();
-			}
 			break;
 		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
 			desc3D = &dst_info->desc3D;
 			// TODO: tex3D->GetDesc(&desc3D); then fix up mip-maps if necessary
 
 			dst_info->hash = CalcTexture3DDescHash(dst_info->data_hash, desc3D);
-			dst_info->InvalidatePerceptualHash();
 			break;
 	}
 
@@ -1928,37 +1242,6 @@ out_unlock:
 
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
 		Profiling::end(&profiling_state, &Profiling::hash_tracking_overhead);
-}
-
-void PropagateResourcePerceptualHash(ID3D11Resource *dst, ID3D11Resource *src)
-{
-	ResourceHandleInfo *dst_info, *src_info;
-
-	EnterCriticalSectionPretty(&G->mCriticalSection);
-
-	dst_info = GetResourceHandleInfo(dst);
-	src_info = GetResourceHandleInfo(src);
-
-	if (!dst_info)
-		goto out_unlock;
-	if (!src_info)
-		goto out_invalidate;
-
-	if (dst_info->type != D3D11_RESOURCE_DIMENSION_TEXTURE2D
-	 || src_info->type != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
-		goto out_invalidate;
-
-	if (!src_info->perceptual_hash_valid)
-		goto out_invalidate;
-
-	dst_info->perceptual_hash = src_info->perceptual_hash;
-	dst_info->perceptual_hash_valid = true;
-	goto out_unlock;
-
-out_invalidate:
-	dst_info->InvalidatePerceptualHash();
-out_unlock:
-	LeaveCriticalSection(&G->mCriticalSection);
 }
 
 bool MapTrackResourceHashUpdate(ID3D11Resource *pResource, UINT Subresource)
@@ -2369,21 +1652,6 @@ void find_texture_override_for_hash(uint32_t hash, TextureOverrideMatches *match
 	}
 }
 
-void find_texture_override_for_phash(uint64_t phash, TextureOverrideMatches *matches, DrawCallInfo *call_info)
-{
-	TextureOverridePHashMap::iterator i;
-	TextureOverrideList::iterator j;
-
-	i = lookup_textureoverride_phash(phash);
-	if (i == G->mTextureOverridePHashMap.end())
-		return;
-
-	for (j = i->second.begin(); j != i->second.end(); j++) {
-		if (matches_draw_info(&(*j), call_info))
-			matches->push_back(&(*j));
-	}
-}
-
 static uint32_t get_hash_for_resource(ID3D11Resource* resource)
 {
 	if (!resource)
@@ -2406,20 +1674,6 @@ void find_texture_overrides_for_resource_by_hash(ID3D11Resource *resource, Textu
 		return;
 
 	find_texture_override_for_hash(hash, matches, call_info);
-}
-
-void find_texture_overrides_for_resource_by_phash(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info)
-{
-	uint64_t phash;
-
-	if (G->mTextureOverridePHashMap.empty())
-		return;
-
-	phash = GetResourcePerceptualHash(resource);
-	if (!phash)
-		return;
-
-	find_texture_override_for_phash(phash, matches, call_info);
 }
 
 TextureOverrideFuzzyMatches* get_fuzzy_matches_by_draw_info(DrawCallInfo* call_info)
@@ -2473,7 +1727,7 @@ static void find_texture_overrides_for_desc(const DescType *desc, TextureOverrid
 }
 
 template <typename DescType>
-void find_texture_overrides(uint32_t hash, uint64_t phash, const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info)
+void find_texture_overrides(uint32_t hash, const DescType *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info)
 {
 	find_texture_override_for_hash(hash, matches, call_info);
 	if (!matches->empty()) {
@@ -2482,21 +1736,14 @@ void find_texture_overrides(uint32_t hash, uint64_t phash, const DescType *desc,
 		return;
 	}
 
-	find_texture_override_for_phash(phash, matches, call_info);
-	if (!matches->empty()) {
-		// phash is also treated as an exact content match, so only fall
-		// back to fuzzy rules if both exact indices missed.
-		return;
-	}
-
 	find_texture_overrides_for_desc(desc, matches, call_info);
 }
 // Explicit template expansion is necessary to generate these functions for
 // the compiler to generate them so they can be used from other source files:
-template void find_texture_overrides<D3D11_BUFFER_DESC>(uint32_t hash, uint64_t phash, const D3D11_BUFFER_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
-template void find_texture_overrides<D3D11_TEXTURE1D_DESC>(uint32_t hash, uint64_t phash, const D3D11_TEXTURE1D_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
-template void find_texture_overrides<D3D11_TEXTURE2D_DESC>(uint32_t hash, uint64_t phash, const D3D11_TEXTURE2D_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
-template void find_texture_overrides<D3D11_TEXTURE3D_DESC>(uint32_t hash, uint64_t phash, const D3D11_TEXTURE3D_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+template void find_texture_overrides<D3D11_BUFFER_DESC>(uint32_t hash, const D3D11_BUFFER_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+template void find_texture_overrides<D3D11_TEXTURE1D_DESC>(uint32_t hash, const D3D11_TEXTURE1D_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+template void find_texture_overrides<D3D11_TEXTURE2D_DESC>(uint32_t hash, const D3D11_TEXTURE2D_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
+template void find_texture_overrides<D3D11_TEXTURE3D_DESC>(uint32_t hash, const D3D11_TEXTURE3D_DESC *desc, TextureOverrideMatches *matches, DrawCallInfo *call_info);
 
 void find_texture_overrides_for_resource_desc(ID3D11Resource* resource, TextureOverrideMatches* matches, DrawCallInfo* call_info)
 {
@@ -2537,7 +1784,6 @@ void find_texture_overrides_for_resource_desc(ID3D11Resource* resource, TextureO
 void find_texture_overrides_for_resource(ID3D11Resource *resource, TextureOverrideMatches *matches, DrawCallInfo *call_info)
 {
 	find_texture_overrides_for_resource_by_hash(resource, matches, call_info);
-	find_texture_overrides_for_resource_by_phash(resource, matches, call_info);
 
 	// Allow fuzzy matches to be processed even when exact matches exist
 	//if (!matches->empty()) {
@@ -2766,12 +2012,6 @@ uint32_t ResourceHandleInfo::GetCachedRegionHash(const RegionHashKeyL2& key)
 	return region_hashes_cache->Get(key);
 }
 
-void ResourceHandleInfo::InvalidatePerceptualHash()
-{
-	perceptual_hash = 0;
-	perceptual_hash_valid = false;
-}
-
 // Helper function that clears region hash cache for a specific D3D resource.
 // Used when the underlying resource contents may have changed.
 void ClearResourceRegionHashCache(ID3D11Resource* resource)
@@ -2783,15 +2023,6 @@ void ClearResourceRegionHashCache(ID3D11Resource* resource)
 		return;
 	}
 	info->ClearDataCache();
-	LeaveCriticalSection(&G->mCriticalSection);
-}
-
-void InvalidateResourcePerceptualHash(ID3D11Resource *resource)
-{
-	EnterCriticalSectionPretty(&G->mCriticalSection);
-	ResourceHandleInfo *info = GetResourceHandleInfo(resource);
-	if (info)
-		info->InvalidatePerceptualHash();
 	LeaveCriticalSection(&G->mCriticalSection);
 }
 
